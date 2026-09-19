@@ -116,6 +116,14 @@ jobs:
         working-directory: servidor-mcp
         run: .venv/bin/python -m ruff check .
 
+      - name: servidor-mcp - mypy (strict)
+        working-directory: servidor-mcp
+        run: .venv/bin/python -m mypy --strict app
+
+      - name: servidor-mcp - bandit
+        working-directory: servidor-mcp
+        run: .venv/bin/python -m bandit -q -r app
+
       - name: servidor-mcp - pytest
         working-directory: servidor-mcp
         run: .venv/bin/python -m pytest -q
@@ -130,6 +138,15 @@ jobs:
         working-directory: agente
         run: .venv/bin/python -m ruff check .
 
+      - name: agente - mypy (strict)
+        working-directory: agente
+        run: .venv/bin/python -m mypy --strict app
+
+      - name: agente - bandit
+        working-directory: agente
+        run: .venv/bin/python -m bandit -q -r app
+
+      # Sem servidor-mcp/.venv (criado acima) a suite FALHA: nao ha AGENTE_TESTS_SEM_SERVIDOR aqui.
       - name: agente - pytest
         working-directory: agente
         run: .venv/bin/python -m pytest -q

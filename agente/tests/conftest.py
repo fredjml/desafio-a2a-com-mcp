@@ -5,7 +5,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from .procs import ServidorMcpReal, python_do_servidor
+from .procs import ServidorMcpReal, exigir_servidor_real
 
 
 @pytest.fixture(scope="session")
@@ -17,8 +17,7 @@ def segredo() -> str:
 @pytest.fixture
 def servidor_mcp(segredo: str) -> Iterator[ServidorMcpReal]:
     """Servidor MCP REAL recem-iniciado (venv do servidor), um por teste (estado das reservas e em memoria)."""
-    if python_do_servidor() is None:
-        pytest.skip("servidor-mcp/.venv ausente")
+    exigir_servidor_real()
     srv = ServidorMcpReal(segredo=segredo)
     try:
         srv.esperar_porta(srv.porta)

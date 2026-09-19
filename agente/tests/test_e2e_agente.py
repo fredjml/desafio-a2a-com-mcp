@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 import pytest
 
-from .procs import AgenteReal, ProxyGravador, ServidorMcpReal, porta_livre, python_do_servidor
+from .procs import AgenteReal, ProxyGravador, ServidorMcpReal, exigir_servidor_real, porta_livre
 
 DIA = "2026-11-03"
 TRACE_ID = secrets.token_hex(16)  # novo por execucao
@@ -102,8 +102,7 @@ def artifact(resposta: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.fixture
 def amb(segredo: str) -> Iterator[Ambiente]:
-    if python_do_servidor() is None:
-        pytest.skip("servidor-mcp/.venv ausente")
+    exigir_servidor_real()
     mcp = ServidorMcpReal(segredo=segredo)
     proxy = None
     agente = None

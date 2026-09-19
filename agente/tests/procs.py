@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 AGENTE_DIR = Path(__file__).resolve().parents[1]
 FORK_DIR = AGENTE_DIR.parent
@@ -42,6 +43,22 @@ def python_do_servidor() -> Path | None:
         if candidato.exists():
             return candidato
     return None
+
+
+def exigir_servidor_real() -> None:
+    """Os testes com servidor MCP real precisam de `servidor-mcp/.venv`. Sem ele a suite FALHA (F-06):
+    pular em silencio deixaria o agente "verde" sem exercitar a ponte. So a variavel explicita
+    `AGENTE_TESTS_SEM_SERVIDOR=1` (uso consciente, ex.: maquina sem o venv do servidor) faz pular.
+    """
+    if python_do_servidor() is not None:
+        return
+    if os.environ.get("AGENTE_TESTS_SEM_SERVIDOR") == "1":
+        pytest.skip("servidor-mcp/.venv ausente e AGENTE_TESTS_SEM_SERVIDOR=1")
+    pytest.fail(
+        "servidor-mcp/.venv ausente: crie o venv do servidor (README, passo 2) ou defina "
+        "AGENTE_TESTS_SEM_SERVIDOR=1 para pular conscientemente os testes com servidor real",
+        pytrace=False,
+    )
 
 
 def porta_livre() -> int:

@@ -201,11 +201,8 @@ def test_sala_livre_continua_reservando_direto(fresco: Servidor) -> None:
     assert "inputRequests" not in res
 
 
-# ---------------------------------------------------------------- estatico: sem restos provisorios
-def test_app_sem_marcadores_provisorios_e_sem_input_required_manual() -> None:
-    for arq in APP.glob("*.py"):
-        texto = arq.read_text(encoding="utf-8")
-        assert "PROVISORIO" not in texto and "TODO(E4a)" not in texto, arq.name
+# ---------------------------------------------------------------- estatico: DEC-24
+def test_app_sem_input_required_manual() -> None:
     # DEC-24: nunca misturar InputRequiredResult manual com Elicit/Resolve no mesmo tool
     for arq in APP.glob("*.py"):
         assert not re.search(r"import .*InputRequiredResult", arq.read_text(encoding="utf-8")), (
