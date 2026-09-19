@@ -18,7 +18,6 @@ from app.a2a import App
 from app.mcp_host import McpHostError, McpProtocolError
 from app.tasks import (
     ESTADOS_TERMINAIS,
-    MSG_CONTINUACAO_PROVISORIA,
     MSG_ERRO_INTERNO,
     PausedRegistry,
     PausedState,
@@ -38,7 +37,6 @@ from .a2a_util import (
     estado,
     h,
     mensagem_de,
-    mensagem_usuario,
     pedido,
     reserva_ok,
     rpc,
@@ -464,18 +462,6 @@ def test_paused_registry_fica_fora_do_task_store_e_nao_expoe_o_estado_no_repr() 
     reg.limpar("task-1")
     reg.limpar("task-1")  # idempotente
     assert reg.obter("task-1") is None and len(reg) == 0
-
-
-async def test_continuacao_provisoria_todo_e7b_de_task_nao_terminal_sem_estado_falha() -> None:
-    """TODO(E7b): hoje nenhuma Task fica pausada; uma nao-terminal sem PausedState falha com clareza."""
-    host = HostFalso([])
-    app = app_com(host)
-    await _guardar(app, "task-pausa", TaskState.TASK_STATE_INPUT_REQUIRED)
-    async with cliente_asgi(app) as c:
-        msg = mensagem_usuario("escolha=sala-fusca", "task-pausa", contextId="ctx-t")
-        r = await rpc(c, "SendMessage", {"message": msg})
-    assert estado(r) == "TASK_STATE_FAILED" and mensagem_de(r) == MSG_CONTINUACAO_PROVISORIA
-    assert host.chamadas == []
 
 
 # ------------------------------------------------------------------------------ allowlist / vazamento

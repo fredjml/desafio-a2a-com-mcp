@@ -25,6 +25,7 @@ from a2a.types.a2a_pb2 import (
     AgentInterface,
     AgentProvider,
     AgentSkill,
+    Task,
 )
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -108,6 +109,34 @@ class DespachanteComGetTaskNoWire(JsonRpcDispatcher):
         return {"task": tarefa}
 
 
+def normalizar_historico(task: Task) -> None:
+    """Deixa o `history` como o wire 10: cada mensagem UMA vez, com o contextId da Task.
+
+    O SDK (1) reempurra para o history o `status.message` ja publicado quando chega a mensagem do
+    usuario da continuacao (a mensagem do agente aparece duplicada) e (2) carimba na mensagem de uma
+    continuacao SEM contextId um id novo, diferente do da Task (T-41). Ambos sao corrigidos ao salvar.
+    """
+    vistos: set[str] = set()
+    i = 0
+    while i < len(task.history):
+        msg = task.history[i]
+        if msg.message_id and msg.message_id in vistos:
+            del task.history[i]
+            continue
+        vistos.add(msg.message_id)
+        if msg.context_id and msg.context_id != task.context_id:
+            msg.context_id = task.context_id
+        i += 1
+
+
+class TaskStoreCoerente(InMemoryTaskStore):
+    """`InMemoryTaskStore` que normaliza o historico da Task antes de salvar."""
+
+    async def save(self, task: Task, context: ServerCallContext) -> None:
+        normalizar_historico(task)
+        await super().save(task, context)
+
+
 class App:
     """Agrupa o que o processo e os testes precisam (host MCP, executor, ASGI)."""
 
@@ -123,7 +152,7 @@ class App:
         self.host = host
         self.pausadas = pausadas if pausadas is not None else PausedRegistry()
         self.executor = executor or ExecutorReservas(host, self.pausadas)
-        self.task_store: TaskStore = task_store if task_store is not None else InMemoryTaskStore()
+        self.task_store: TaskStore = task_store if task_store is not None else TaskStoreCoerente()
         self.card = criar_card(config)
         self.handler = DefaultRequestHandler(
             agent_executor=self.executor,

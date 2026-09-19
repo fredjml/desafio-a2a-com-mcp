@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from a2a.helpers import new_task_from_user_message
@@ -33,7 +33,7 @@ from mcp_types import (
 
 from .log import emitir
 from .mcp_host import McpHostError
-from .parser import PedidoInvalido, parse_pedido
+from .parser import PedidoInvalido, parse_escolha, parse_pedido
 from .trace import novo_trace_id, trace_id_de
 
 FERRAMENTA_RESERVA = "reservar_sala"
@@ -45,8 +45,6 @@ ESTADOS_TERMINAIS = frozenset(
         TaskState.TASK_STATE_REJECTED,
     }
 )
-# TODO(E7b): substituir pela retomada (escolha=<v>) com o PausedState.
-MSG_CONTINUACAO_PROVISORIA = "A continuacao de Tasks pausadas ainda nao esta implementada."
 MSG_ERRO_INTERNO = "Erro interno do agente ao processar o pedido."
 MSG_PERGUNTA_INVALIDA = "O servidor MCP pediu uma escolha em formato que o agente nao entende."
 MSG_RECUSADA = "Reserva recusada: nenhuma sala foi reservada."
@@ -310,8 +308,8 @@ class ExecutorReservas(AgentExecutor):
         if nova:
             # O 1o evento DEVE ser a Task (senao o SDK rejeita: "Agent should enqueue Task before ...").
             await event_queue.enqueue_event(new_task_from_user_message(mensagem))
-        await upd.start_work()
         try:
+            await upd.start_work()
             if nova:
                 await self._nova(context, saida)
             else:
@@ -392,8 +390,82 @@ class ExecutorReservas(AgentExecutor):
         await saida.pausou(texto_alternativas(pergunta.opcoes))
 
     async def _continuacao(self, context: RequestContext, saida: _Saida) -> None:
-        # TODO(E7b): escolha=<v> / escolha=recusar sobre o PausedState desta Task.
-        await saida.falhou(MSG_CONTINUACAO_PROVISORIA)
+        """Retomada: `escolha=<v>` (v nas opcoes RECEBIDAS) ou `escolha=recusar`, sobre o PausedState."""
+        task_id = str(context.task_id)
+        estado = self.pausadas.obter(task_id)
+        if estado is None:  # Task nao terminal sem estado guardado: nao ha como retomar
+            await saida.falhou(MSG_SEM_ESTADO)
+            return
+        lista = texto_alternativas(estado.enum)
+        try:
+            valor = parse_escolha(context.get_user_input())
+        except PedidoInvalido as exc:  # nao e `escolha=...`: resposta clara, sem chamar o MCP
+            emitir("ponte", acao="resposta_invalida", task=task_id)
+            await saida.pausou(f"{exc}\n{lista}")
+            return
+        if valor == ESCOLHA_RECUSAR:
+            resposta = ElicitResult(action="decline")
+        elif valor in estado.enum:
+            resposta = ElicitResult(action="accept", content={estado.campo: valor})
+        else:  # fora das opcoes (vazio, maiusculas, espacos, sala-xyz): mesma lista, estado intacto
+            emitir("ponte", acao="escolha_fora_das_opcoes", task=task_id)
+            await saida.pausou(lista)
+            return
+
+        aceita = resposta.action == "accept"
+        try:
+            # A politica vem do resource, lida NESTA Task, antes do retry (que pode criar a reserva).
+            politica = await self._mcp.versao_da_politica(estado.trace_id) if aceita else ""
+            if self._mcp.geracao != estado.geracao_cliente:
+                # Um Client novo recomeca os ids em 1: o retry poderia repetir o id da chamada inicial.
+                emitir("ponte", acao="cliente_recriado", task=task_id)
+                await saida.falhou(MSG_CLIENTE_RECRIADO)
+                return
+            emitir("ponte", acao="retomada", task=task_id, trace_id=estado.trace_id, aceita=aceita)
+            resultado = await self._mcp.chamar_ferramenta(
+                estado.tool_name,
+                dict(estado.original_arguments),
+                trace_id=estado.trace_id,
+                input_responses={estado.input_request_key: resposta},
+                request_state=estado.request_state,
+            )
+        except McpHostError as exc:
+            emitir("mcp_falha", task=task_id, tipo=exc.tipo)
+            await saida.falhou(mensagem_de_falha_mcp(exc))
+            return
+
+        if isinstance(resultado, InputRequiredResult):  # nova rodada (R-BR-07): segue pausada
+            pergunta = extrair_pergunta(resultado)
+            if pergunta is None:
+                await saida.falhou(MSG_PERGUNTA_INVALIDA)
+                return
+            self.pausadas.guardar(
+                replace(
+                    estado,
+                    input_request_key=pergunta.chave,
+                    campo=pergunta.campo,
+                    enum=list(pergunta.opcoes),
+                    request_state=pergunta.request_state,
+                    rodada=estado.rodada + 1,
+                )
+            )
+            emitir("ponte", acao="nova_rodada", task=task_id, rodada=estado.rodada + 1)
+            await saida.pausou(texto_alternativas(pergunta.opcoes))
+            return
+        if resultado.is_error:
+            await saida.falhou(texto_da_tool(resultado))  # mensagem EXATA da tool
+            return
+        if not aceita:
+            await saida.cancelou(MSG_RECUSADA)
+            return
+        reserva = reserva_do_resultado(resultado)
+        if reserva is None:
+            await saida.falhou("Resposta inesperada do servidor MCP ao reservar a sala.")
+            return
+        await saida.concluiu(
+            f"Reserva {reserva['reserva']} confirmada na {reserva['sala']}.",
+            artifact_da_reserva(reserva, politica),
+        )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         task_id = context.task_id
