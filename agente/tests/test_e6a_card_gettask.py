@@ -164,7 +164,11 @@ async def test_erros_jsonrpc_sao_bem_formados() -> None:
     async with cliente_asgi(app_com(HostFalso())) as c:
         inexistente = await rpc(c, "MetodoQueNaoExiste", {})
         lixo = (
-            await c.post("/a2a", content="{isso nao e json", headers={"A2A-Version": "1.0"})
+            await c.post(
+                "/a2a",
+                content="{isso nao e json",
+                headers={"A2A-Version": "1.0", "Content-Type": "application/json"},
+            )
         ).json()
         sem_params = await rpc(c, "GetTask", {})
     assert inexistente["error"]["code"] == -32601

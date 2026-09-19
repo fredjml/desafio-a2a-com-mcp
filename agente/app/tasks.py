@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -48,7 +50,10 @@ ESTADOS_TERMINAIS = frozenset(
 MSG_ERRO_INTERNO = "Erro interno do agente ao processar o pedido."
 MSG_PERGUNTA_INVALIDA = "O servidor MCP pediu uma escolha em formato que o agente nao entende."
 MSG_RECUSADA = "Reserva recusada: nenhuma sala foi reservada."
-MSG_SEM_ESTADO = "Esta Task nao tem mais o estado necessario para continuar. Envie um novo pedido."
+# Estado expirado (vale ~o TTL do requestState no servidor) ou perdido: nao ha como retomar a pausa.
+MSG_SEM_ESTADO = (
+    "Estado expirado; reenvie o pedido. Esta Task nao tem mais o estado necessario para continuar."
+)
 MSG_CLIENTE_RECRIADO = (
     "A conexao com o servidor MCP foi refeita desde a pausa e a escolha nao foi enviada, para "
     "nao repetir um id de requisicao. Envie um novo pedido."
@@ -91,19 +96,43 @@ class PausedState:
 
 
 class PausedRegistry:
-    """dict por task_id, separado do TaskStore (nao pode vazar no GetTask/ListTasks)."""
+    """dict por task_id, separado do TaskStore (nao pode vazar no GetTask).
 
-    def __init__(self) -> None:
-        self._por_task: dict[str, PausedState] = {}
+    Cada estado vale `ttl_s` a partir do ultimo `guardar` (cada rodada renova o requestState no
+    servidor). Passado o prazo o estado deixa de existir: `obter` devolve None e `expurgar` (varredura
+    preguicosa, chamada a cada SendMessage; sem thread) o remove. Continuar uma Task assim termina em
+    FAILED com "estado expirado; reenvie o pedido".
+    """
+
+    def __init__(self, ttl_s: float = 660.0, relogio: Callable[[], float] = time.monotonic) -> None:
+        self._por_task: dict[str, tuple[PausedState, float]] = {}
+        self._ttl_s = ttl_s
+        self._relogio = relogio
 
     def guardar(self, estado: PausedState) -> None:
-        self._por_task[estado.task_id] = estado
+        self._por_task[estado.task_id] = (estado, self._relogio())
+
+    def _expirado(self, guardado_em: float) -> bool:
+        return self._relogio() - guardado_em > self._ttl_s
 
     def obter(self, task_id: str) -> PausedState | None:
-        return self._por_task.get(task_id)
+        item = self._por_task.get(task_id)
+        if item is None:
+            return None
+        if self._expirado(item[1]):
+            del self._por_task[task_id]
+            return None
+        return item[0]
 
     def limpar(self, task_id: str) -> None:
         self._por_task.pop(task_id, None)
+
+    def expurgar(self) -> int:
+        """Remove os estados vencidos; devolve quantos."""
+        vencidos = [i for i, (_, em) in self._por_task.items() if self._expirado(em)]
+        for task_id in vencidos:
+            del self._por_task[task_id]
+        return len(vencidos)
 
     def __len__(self) -> int:
         return len(self._por_task)
@@ -304,6 +333,9 @@ class ExecutorReservas(AgentExecutor):
             message_id_generator=GeradorComPrefixo("msg-"),
         )
         saida = _Saida(upd)
+        removidos = self.pausadas.expurgar()  # varredura preguicosa de pausas vencidas
+        if removidos:
+            emitir("ponte", acao="pausas_expiradas", quantidade=removidos)
         nova = atual is None
         if nova:
             # O 1o evento DEVE ser a Task (senao o SDK rejeita: "Agent should enqueue Task before ...").

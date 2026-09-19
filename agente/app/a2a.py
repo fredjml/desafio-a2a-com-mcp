@@ -9,7 +9,7 @@ Ajustes obrigatorios do spike S2:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -26,6 +26,7 @@ from a2a.types.a2a_pb2 import (
     AgentProvider,
     AgentSkill,
     Task,
+    TaskState,
 )
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -35,7 +36,14 @@ from starlette.types import ASGIApp
 from .config import Config
 from .log import RegistroDeRequests
 from .mcp_host import McpHost
-from .tasks import ExecutorReservas, GeradorComPrefixo, PausedRegistry, ServicoMcp
+from .seguranca import ProtecaoDeEntrada
+from .tasks import (
+    ESTADOS_TERMINAIS,
+    ExecutorReservas,
+    GeradorComPrefixo,
+    PausedRegistry,
+    ServicoMcp,
+)
 
 VERSAO_A2A = "1.0"
 CAMINHO_RPC = "/a2a"
@@ -97,10 +105,22 @@ class ContextoComVersaoPadrao(DefaultServerCallContextBuilder):
 class DespachanteComGetTaskNoWire(JsonRpcDispatcher):
     """`GetTask` devolve `result.task`, identico ao wire 09 (o SDK 1.1.4 devolve a Task direto em `result`).
 
+    `ListTasks` fica DESABILITADO (-32601): esta fora do contrato do desafio (so SendMessage/GetTask) e
+    enumerava todas as Tasks, com historico, a qualquer cliente (M2). Sem a entrada no mapa, o proprio
+    SDK responde "metodo nao encontrado".
+
     Decisao E7: fidelidade ao wire (o validador aceita as duas formas). So o formato do `GetTask` muda;
     `SendMessage` ja devolve `result.task` no SDK. Sobrescreve o metodo interno `_handle_get_task`
     (versao do SDK travada em 1.1.4; um teste confere o formato).
     """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.METHOD_TO_MODEL = {
+            metodo: modelo
+            for metodo, modelo in JsonRpcDispatcher.METHOD_TO_MODEL.items()
+            if metodo != "ListTasks"
+        }
 
     async def _handle_get_task(
         self, request_obj: Any, context: ServerCallContext
@@ -130,11 +150,43 @@ def normalizar_historico(task: Task) -> None:
 
 
 class TaskStoreCoerente(InMemoryTaskStore):
-    """`InMemoryTaskStore` que normaliza o historico da Task antes de salvar."""
+    """`InMemoryTaskStore` que normaliza o historico da Task antes de salvar e limita a memoria (M2).
+
+    Teto de Tasks retidas (`max_tasks`): ao exceder, descarta as TERMINAIS menos recentemente
+    atualizadas primeiro e, se ainda sobrar excesso, as INPUT_REQUIRED mais antigas (a pausa abandonada
+    vira erro claro se o usuario voltar). Tasks em execucao (SUBMITTED/WORKING) e a Task que acabou de
+    ser salva nunca sao descartadas. `ao_descartar(task_id)` avisa quem guarda estado paralelo.
+    """
+
+    def __init__(
+        self, *, max_tasks: int = 1000, ao_descartar: Callable[[str], None] | None = None
+    ) -> None:
+        super().__init__()
+        self._max_tasks = max_tasks
+        self._ao_descartar = ao_descartar
+        self._estados: dict[str, int] = {}  # ordem = ultima atualizacao
 
     async def save(self, task: Task, context: ServerCallContext) -> None:
         normalizar_historico(task)
         await super().save(task, context)
+        self._estados.pop(task.id, None)  # reinsere no fim: o mais antigo fica na frente
+        self._estados[task.id] = task.status.state
+        if len(self._estados) > self._max_tasks:
+            await self._aparar(task.id, context)
+
+    async def _aparar(self, preservar: str, context: ServerCallContext) -> None:
+        excesso = len(self._estados) - self._max_tasks
+        candidatas = [i for i, e in self._estados.items() if e in ESTADOS_TERMINAIS] + [
+            i for i, e in self._estados.items() if e == TaskState.TASK_STATE_INPUT_REQUIRED
+        ]
+        for task_id in [i for i in candidatas if i != preservar][:excesso]:
+            await super().delete(task_id, context)
+            self._estados.pop(task_id, None)
+            if self._ao_descartar is not None:
+                self._ao_descartar(task_id)
+
+    def __len__(self) -> int:
+        return len(self._estados)
 
 
 class App:
@@ -150,9 +202,15 @@ class App:
     ) -> None:
         self.config = config
         self.host = host
-        self.pausadas = pausadas if pausadas is not None else PausedRegistry()
+        self.pausadas = (
+            pausadas if pausadas is not None else PausedRegistry(ttl_s=config.pausa_ttl_s)
+        )
         self.executor = executor or ExecutorReservas(host, self.pausadas)
-        self.task_store: TaskStore = task_store if task_store is not None else TaskStoreCoerente()
+        self.task_store: TaskStore = (
+            task_store
+            if task_store is not None
+            else TaskStoreCoerente(max_tasks=config.max_tasks, ao_descartar=self.pausadas.limpar)
+        )
         self.card = criar_card(config)
         self.handler = DefaultRequestHandler(
             agent_executor=self.executor,
@@ -181,7 +239,12 @@ class App:
         rotas: list[Any] = create_agent_card_routes(self.card) + [
             Route(CAMINHO_RPC, endpoint=despachante.handle_requests, methods=["POST"])
         ]
-        return RegistroDeRequests(Starlette(routes=rotas, lifespan=self._ciclo_de_vida))
+        protegido = ProtecaoDeEntrada(
+            Starlette(routes=rotas, lifespan=self._ciclo_de_vida),
+            caminhos_rpc=[CAMINHO_RPC],
+            hosts_permitidos=[self.config.card_host],
+        )
+        return RegistroDeRequests(protegido)
 
 
 def criar_app(config: Config, host: ServicoMcp | None = None) -> App:

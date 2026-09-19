@@ -16,6 +16,10 @@ MCP_URL_PADRAO = "http://localhost:7301/mcp"
 HOST_CARD_PADRAO = "127.0.0.1"
 TIMEOUT_MCP_PADRAO_S = 10.0
 TIMEOUT_MCP_MAX_S = 120.0
+# Retencao em memoria (M2): teto de Tasks e validade do estado de uma Task pausada. 660 s = os 600 s do
+# requestState no servidor + 60 s de margem; se REQUEST_STATE_TTL_S do servidor for maior, aumente.
+MAX_TASKS_PADRAO = 1000
+PAUSA_TTL_PADRAO_S = 660.0
 
 
 class ConfigError(Exception):
@@ -28,6 +32,8 @@ class Config:
     mcp_url: str
     mcp_timeout_s: float
     card_host: str
+    max_tasks: int = MAX_TASKS_PADRAO
+    pausa_ttl_s: float = PAUSA_TTL_PADRAO_S
 
     @property
     def card_url(self) -> str:
@@ -83,6 +89,30 @@ def _host_card(valor: str | None) -> str:
     return host
 
 
+def _max_tasks(valor: str | None) -> int:
+    if valor is None or not valor.strip():
+        return MAX_TASKS_PADRAO
+    try:
+        maximo = int(valor.strip())
+    except ValueError:
+        raise ConfigError("A2A_MAX_TASKS invalido: use um inteiro entre 1 e 1000000.") from None
+    if not 1 <= maximo <= 1_000_000:
+        raise ConfigError("A2A_MAX_TASKS invalido: use um inteiro entre 1 e 1000000.")
+    return maximo
+
+
+def _pausa_ttl(valor: str | None) -> float:
+    if valor is None or not valor.strip():
+        return PAUSA_TTL_PADRAO_S
+    try:
+        segundos = float(valor.strip())
+    except ValueError:
+        raise ConfigError("A2A_PAUSA_TTL_S invalido: use um numero de segundos.") from None
+    if not 1.0 <= segundos <= 86400.0:  # tambem rejeita nan/inf
+        raise ConfigError("A2A_PAUSA_TTL_S invalido: use entre 1 e 86400 segundos.")
+    return segundos
+
+
 def carregar_config(env: Mapping[str, str] | None = None) -> Config:
     ambiente = os.environ if env is None else env
     return Config(
@@ -90,4 +120,6 @@ def carregar_config(env: Mapping[str, str] | None = None) -> Config:
         mcp_url=_mcp_url(ambiente.get("MCP_URL")),
         mcp_timeout_s=_timeout(ambiente.get("MCP_TIMEOUT_S")),
         card_host=_host_card(ambiente.get("A2A_CARD_HOST")),
+        max_tasks=_max_tasks(ambiente.get("A2A_MAX_TASKS")),
+        pausa_ttl_s=_pausa_ttl(ambiente.get("A2A_PAUSA_TTL_S")),
     )

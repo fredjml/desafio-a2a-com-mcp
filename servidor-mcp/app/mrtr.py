@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field, create_model
 
 from .alternatives import alternativas
 from .data import Dados
-from .policy import MSG_SEM_ALTERNATIVAS, ErroDeDominio, validar_pedido
+from .policy import MSG_SEM_ALTERNATIVAS, ErroDeDominio, validar_pedido, validar_responsavel
 from .reservations import Agenda
 from .tempo import formatar_instante
 from .tools import ReservaOut, resultado_erro, resultado_ok
@@ -107,7 +107,7 @@ def criar_resolvedor(
     # `async` sem `await`: roda no event loop (um resolvedor sincrono iria para uma thread e leria a
     # agenda fora do loop, quebrando a atomicidade do check-then-insert do corpo da tool).
     async def escolha_de_sala(
-        sala: str, inicio: str, fim: str, ctx: Context[Any, Any]
+        sala: str, inicio: str, fim: str, responsavel: str, ctx: Context[Any, Any]
     ) -> Elicit[Any] | Desfecho:
         if estado_ausente_no_retry(ctx):
             # O SDK trata `requestState` ausente/null como "sem progresso" e re-perguntaria; um retry
@@ -119,6 +119,7 @@ def criar_resolvedor(
             )
         try:
             intervalo = validar_pedido(sala, inicio, fim, ids_das_salas)
+            validar_responsavel(responsavel)  # antes de perguntar: nao pausar pedido invalido
         except ErroDeDominio as erro:
             return ErroDeExecucao(mensagem=erro.mensagem)
         if cliente_recusou(ctx):

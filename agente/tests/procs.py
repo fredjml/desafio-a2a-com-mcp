@@ -27,7 +27,14 @@ SERVIDOR_DIR = FORK_DIR / "servidor-mcp"
 _PY_SERVIDOR_WIN = SERVIDOR_DIR / ".venv" / "Scripts" / "python.exe"
 _PY_SERVIDOR_POSIX = SERVIDOR_DIR / ".venv" / "bin" / "python"
 _VARS_DO_SERVIDOR = ("REQUEST_STATE_SECRET", "REQUEST_STATE_TTL_S", "MCP_PORT", "DADOS_DIR")
-_VARS_DO_AGENTE = ("A2A_PORT", "MCP_URL", "MCP_TIMEOUT_S", "A2A_CARD_HOST")
+_VARS_DO_AGENTE = (
+    "A2A_PORT",
+    "MCP_URL",
+    "MCP_TIMEOUT_S",
+    "A2A_CARD_HOST",
+    "A2A_MAX_TASKS",
+    "A2A_PAUSA_TTL_S",
+)
 
 
 def python_do_servidor() -> Path | None:

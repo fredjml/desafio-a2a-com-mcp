@@ -24,17 +24,22 @@ __all__ = [
     "MSG_FORMATO",  # definida em tempo.py (junto do parser); as mensagens de erro sao reexportadas aqui
     "MSG_INTERVALO",
     "MSG_JANELA",
+    "MSG_RESPONSAVEL",
     "MSG_SEM_ALTERNATIVAS",
     "ErroDeDominio",
     "Intervalo",
     "msg_sala_inexistente",
     "validar_pedido",
+    "validar_responsavel",
 ]
 
 MSG_JANELA = "Fora da janela de uso: a politica permite reservas entre 08:00 e 20:00"
 MSG_DURACAO = "Duracao acima do limite: a politica permite no maximo 2 horas"
 MSG_INTERVALO = "Intervalo invalido: fim deve ser posterior a inicio"
 MSG_SEM_ALTERNATIVAS = "Sem alternativas disponiveis no intervalo"
+# Texto proprio (o enunciado nao define): nao e uma das cinco mensagens exatas; o validador nao a testa.
+MSG_RESPONSAVEL = "Formato invalido: responsavel deve ter de 1 a 200 caracteres"
+RESPONSAVEL_MAX = 200
 
 JANELA_ABRE = time(8, 0)
 JANELA_FECHA = time(20, 0)
@@ -57,6 +62,12 @@ class ErroDeDominio(Exception):
 class Intervalo:
     inicio: datetime  # normalizados para -03:00
     fim: datetime
+
+
+def validar_responsavel(responsavel: str) -> None:
+    """`responsavel` obrigatorio: 1 a 200 caracteres (so espacos conta como vazio)."""
+    if not responsavel.strip() or len(responsavel) > RESPONSAVEL_MAX:
+        raise ErroDeDominio(MSG_RESPONSAVEL)
 
 
 def validar_pedido(sala: str, inicio: str, fim: str, salas_existentes: Container[str]) -> Intervalo:

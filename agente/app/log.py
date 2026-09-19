@@ -41,7 +41,7 @@ def emitir(evento: str, **campos: Any) -> None:
         "evento": evento,
         **seguros,
     }
-    print(json.dumps(linha, ensure_ascii=False, default=str), file=sys.stderr, flush=True)
+    print(json.dumps(linha, ensure_ascii=True, default=str), file=sys.stderr, flush=True)
 
 
 def silenciar_ruido() -> None:
@@ -80,7 +80,7 @@ def campos_do_request(corpo: bytes, cabecalhos: dict[str, str]) -> dict[str, Any
         return campos
     try:
         msg = json.loads(corpo)
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: JSON muito aninhado (100 KB de "[")
         return campos
     if not isinstance(msg, dict):
         return campos

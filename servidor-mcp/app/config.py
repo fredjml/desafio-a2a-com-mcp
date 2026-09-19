@@ -10,12 +10,16 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 
 PORTA_PADRAO = 7301
 # Placeholder do .env.example: colar o exemplo sem gerar a chave nao pode subir o servidor.
 PLACEHOLDER_SEGREDO = "<cole-aqui-64-hex-gerados-localmente>"
 MIN_BYTES_SEGREDO = 32
+# Barreira contra descuido (nao contra operador malicioso): o segredo real vem de token_hex(32).
+MIN_BYTES_DISTINTOS = 16
+PERIODO_MAX_REPETIDO = 8
 # TTL do requestState: 10 min (faixa 5-30 min do enunciado). REQUEST_STATE_TTL_S existe para os testes de
 # expiracao (TTL curto); o limite superior impede alongar a janela alem do que o enunciado admite.
 TTL_PADRAO_S = 600.0
@@ -42,6 +46,17 @@ class Config:
     request_state_ttl_s: float = TTL_PADRAO_S
 
 
+def _sem_aleatoriedade(bruto: bytes) -> bool:
+    """Poucos bytes distintos, padrao periodico curto (ex.: `deadbeef` x8) ou progressao aritmetica."""
+    if len(set(bruto)) < MIN_BYTES_DISTINTOS:
+        return True
+    for periodo in range(1, PERIODO_MAX_REPETIDO + 1):
+        if all(bruto[i] == bruto[i + periodo] for i in range(len(bruto) - periodo)):
+            return True
+    passos = {(b - a) % 256 for a, b in pairwise(bruto)}
+    return len(passos) == 1  # ex.: 00 01 02 ... 1f
+
+
 def validar_segredo(valor: str | None) -> str:
     """Devolve o segredo normalizado ou levanta ConfigError (sem ecoar o valor)."""
     if valor is None or not valor.strip():
@@ -64,7 +79,7 @@ def validar_segredo(valor: str | None) -> str:
             f"REQUEST_STATE_SECRET curto demais: sao necessarios {MIN_BYTES_SEGREDO} bytes "
             f"({MIN_BYTES_SEGREDO * 2} caracteres hexadecimais)."
         )
-    if len(set(bruto)) < 8:
+    if _sem_aleatoriedade(bruto):
         raise ConfigError("REQUEST_STATE_SECRET sem aleatoriedade suficiente: gere um valor novo.")
     return segredo
 
