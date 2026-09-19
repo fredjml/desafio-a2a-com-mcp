@@ -10,6 +10,7 @@ import pytest
 from app.config import (
     DADOS_PADRAO,
     PLACEHOLDER_SEGREDO,
+    Config,
     ConfigError,
     carregar_config,
     validar_segredo,
@@ -93,19 +94,44 @@ def test_ttl_padrao_do_request_state_e_600_s() -> None:
     )
 
 
+def _cfg(**extra: str) -> Config:
+    return carregar_config({"REQUEST_STATE_SECRET": secrets.token_hex(32), **extra})
+
+
 @pytest.mark.parametrize(
-    ("valor", "esperado"), [("2", 2.0), (" 30 ", 30.0), ("1.5", 1.5), ("1800", 1800.0)]
+    ("valor", "esperado"), [("300", 300.0), (" 600 ", 600.0), ("300.5", 300.5), ("1800", 1800.0)]
 )
-def test_ttl_via_ambiente_para_testes_de_expiracao(valor: str, esperado: float) -> None:
-    cfg = carregar_config(
-        {"REQUEST_STATE_SECRET": secrets.token_hex(32), "REQUEST_STATE_TTL_S": valor}
-    )
-    assert cfg.request_state_ttl_s == esperado
+def test_ttl_aceita_so_a_faixa_do_enunciado_300_a_1800_s(valor: str, esperado: float) -> None:
+    cfg = _cfg(REQUEST_STATE_TTL_S=valor)
+    assert cfg.request_state_ttl_s == esperado and cfg.ttl_de_teste is False
+
+
+@pytest.mark.parametrize(
+    "valor", ["299", "299.9", "1801", "0", "-1", "1", "2", "abc", "nan", "inf", "-inf", "1e9", ""]
+)
+def test_ttl_fora_da_faixa_falha_no_boot(valor: str) -> None:
+    if valor == "":  # vazio = nao definido: cai no padrao, nao e erro
+        assert _cfg(REQUEST_STATE_TTL_S=valor).request_state_ttl_s == 600.0
+        return
+    with pytest.raises(ConfigError, match="REQUEST_STATE_TTL_S"):
+        _cfg(REQUEST_STATE_TTL_S=valor)
+
+
+@pytest.mark.parametrize(
+    ("valor", "esperado"), [("2", 2.0), (" 30 ", 30.0), ("1", 1.0), ("1.5", 1.5), ("1800", 1800.0)]
+)
+def test_ttl_de_teste_aceita_1_a_1800_s_e_e_sinalizado(valor: str, esperado: float) -> None:
+    cfg = _cfg(REQUEST_STATE_TTL_S_SOMENTE_TESTE=valor)
+    assert cfg.request_state_ttl_s == esperado and cfg.ttl_de_teste is True
 
 
 @pytest.mark.parametrize("valor", ["0", "0.5", "-1", "1801", "abc", "nan", "inf", "1e9"])
-def test_ttl_invalido_falha_no_boot(valor: str) -> None:
-    with pytest.raises(ConfigError, match="REQUEST_STATE_TTL_S"):
-        carregar_config(
-            {"REQUEST_STATE_SECRET": secrets.token_hex(32), "REQUEST_STATE_TTL_S": valor}
-        )
+def test_ttl_de_teste_invalido_falha_no_boot(valor: str) -> None:
+    with pytest.raises(ConfigError, match="REQUEST_STATE_TTL_S_SOMENTE_TESTE"):
+        _cfg(REQUEST_STATE_TTL_S_SOMENTE_TESTE=valor)
+
+
+def test_ttl_de_teste_tem_precedencia_sobre_o_ttl_normal() -> None:
+    cfg = _cfg(REQUEST_STATE_TTL_S="900", REQUEST_STATE_TTL_S_SOMENTE_TESTE="3")
+    assert cfg.request_state_ttl_s == 3.0 and cfg.ttl_de_teste is True
+

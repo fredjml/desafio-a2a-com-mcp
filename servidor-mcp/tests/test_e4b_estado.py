@@ -544,7 +544,7 @@ def test_restart_na_mesma_porta_tambem_conclui(segredo: str) -> None:
 
 # ---------------------------------------------------------------- T-05: expiracao (TTL curto so em teste)
 def test_estado_expirado_e_rejeitado_e_o_recem_emitido_vale(segredo: str) -> None:
-    srv = Servidor(segredo=segredo, env_extra={"REQUEST_STATE_TTL_S": "2"})
+    srv = Servidor(segredo=segredo, env_extra={"REQUEST_STATE_TTL_S_SOMENTE_TESTE": "2"})
     try:
         srv.esperar_pronto()
         chave, estado, _ = pedir(srv, G)
@@ -562,9 +562,36 @@ def test_estado_expirado_e_rejeitado_e_o_recem_emitido_vale(segredo: str) -> Non
         srv.parar()
 
 
+def _boot(srv: Servidor) -> dict[str, Any]:
+    return dict(json.loads(next(ln for ln in srv.stderr if '"evento": "boot"' in ln)))
+
+
 def test_ttl_padrao_e_600_s_e_aparece_no_boot(servidor: Servidor) -> None:
-    boot = json.loads(next(ln for ln in servidor.stderr if '"evento": "boot"' in ln))
-    assert boot["request_state_ttl_s"] == 600.0
+    boot = _boot(servidor)
+    assert boot["request_state_ttl_s"] == 600.0 and boot["ttl_de_teste"] is False
+    assert not any('"ttl_de_teste": true' in ln for ln in servidor.stderr)  # sem aviso de teste
+
+
+def test_ttl_de_teste_e_sinalizado_no_boot_com_aviso(segredo: str) -> None:
+    srv = Servidor(segredo=segredo, env_extra={"REQUEST_STATE_TTL_S_SOMENTE_TESTE": "7"})
+    try:
+        srv.esperar_pronto()
+        boot = _boot(srv)
+        assert boot["request_state_ttl_s"] == 7.0 and boot["ttl_de_teste"] is True
+        avisos = [json.loads(ln) for ln in srv.stderr if '"evento": "aviso"' in ln]
+        assert any(a.get("ttl_de_teste") is True and "TESTE" in a["mensagem"] for a in avisos)
+    finally:
+        srv.parar()
+
+
+@pytest.mark.parametrize("valor", ["299", "1801", "0", "nan", "abc"])
+def test_ttl_normal_fora_da_faixa_derruba_o_boot_com_exit_2(segredo: str, valor: str) -> None:
+    srv = Servidor(segredo=segredo, env_extra={"REQUEST_STATE_TTL_S": valor})
+    try:
+        assert srv.esperar_saida() == 2
+        assert any("REQUEST_STATE_TTL_S" in ln and "erro_boot" in ln for ln in srv.stderr)
+    finally:
+        srv.parar()
 
 
 # ---------------------------------------------------------------- privacidade (R-MRTR-05, CLAUDE.md 9)

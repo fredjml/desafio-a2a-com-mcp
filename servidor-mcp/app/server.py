@@ -106,8 +106,18 @@ def servir(config: Config) -> None:
         versao=VERSAO_SERVIDOR,
         request_state="selado com keys explicitas de REQUEST_STATE_SECRET",
         request_state_ttl_s=config.request_state_ttl_s,
+        ttl_de_teste=config.ttl_de_teste,
         python=sys.version.split()[0],
     )
+    if config.ttl_de_teste:
+        emitir(
+            "aviso",
+            mensagem=(
+                "TTL do requestState de TESTE (REQUEST_STATE_TTL_S_SOMENTE_TESTE): fora da faixa de 5 a 30 min "
+                "do enunciado; nao use em producao"
+            ),
+            ttl_de_teste=True,
+        )
     # access_log=False: o access log do uvicorn vai a stdout e nao traz metodo/id/traceparent.
     servidor = uvicorn.Server(
         uvicorn.Config(app, log_level="warning", access_log=False, http="h11", ws="none")

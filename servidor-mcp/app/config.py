@@ -20,11 +20,15 @@ MIN_BYTES_SEGREDO = 32
 # Barreira contra descuido (nao contra operador malicioso): o segredo real vem de token_hex(32).
 MIN_BYTES_DISTINTOS = 16
 PERIODO_MAX_REPETIDO = 8
-# TTL do requestState: 10 min (faixa 5-30 min do enunciado). REQUEST_STATE_TTL_S existe para os testes de
-# expiracao (TTL curto); o limite superior impede alongar a janela alem do que o enunciado admite.
+# TTL do requestState: o enunciado exige expiracao entre 5 e 30 min. Padrao 10 min; REQUEST_STATE_TTL_S
+# aceita SOMENTE 300 a 1800 s (fora da faixa: ConfigError, exit 2 no boot).
 TTL_PADRAO_S = 600.0
-TTL_MIN_S = 1.0
+TTL_MIN_S = 300.0
 TTL_MAX_S = 1800.0
+# Via SO de teste (expiracao em segundos): tem precedencia, e o boot a sinaliza (`ttl_de_teste: true`).
+# Nunca e a via documentada para producao.
+TTL_TESTE_VAR = "REQUEST_STATE_TTL_S_SOMENTE_TESTE"
+TTL_TESTE_MIN_S = 1.0
 ARQUIVOS_DADOS = ("salas.json", "reservas.json", "politica-de-uso.md")
 
 _HEX = re.compile(r"[0-9a-fA-F]+")
@@ -44,6 +48,8 @@ class Config:
     # repr=False: um `print(config)` acidental nao pode vazar a chave.
     request_state_secret: str = field(repr=False)
     request_state_ttl_s: float = TTL_PADRAO_S
+    # True quando o TTL veio da variavel SOMENTE_TESTE (fora da faixa 5-30 min do enunciado).
+    ttl_de_teste: bool = False
 
 
 def _sem_aleatoriedade(bruto: bytes) -> bool:
@@ -96,16 +102,26 @@ def _porta(valor: str | None) -> int:
     return porta
 
 
-def _ttl(valor: str | None) -> float:
+def _ttl(valor: str | None, *, nome: str, minimo: float) -> float | None:
+    """None se a variavel esta vazia/ausente; senao o TTL (finito e dentro de [minimo, TTL_MAX_S])."""
     if valor is None or not valor.strip():
-        return TTL_PADRAO_S
+        return None
     try:
         ttl = float(valor.strip())
     except ValueError:
-        raise ConfigError("REQUEST_STATE_TTL_S invalido: use um numero de segundos.") from None
-    if not TTL_MIN_S <= ttl <= TTL_MAX_S:  # tambem rejeita nan/inf
-        raise ConfigError(f"REQUEST_STATE_TTL_S invalido: use de {TTL_MIN_S:g} a {TTL_MAX_S:g} s.")
+        raise ConfigError(f"{nome} invalido: use um numero de segundos.") from None
+    if not minimo <= ttl <= TTL_MAX_S:  # tambem rejeita nan/inf
+        raise ConfigError(f"{nome} invalido: use de {minimo:g} a {TTL_MAX_S:g} s.")
     return ttl
+
+
+def _ttl_efetivo(ambiente: Mapping[str, str]) -> tuple[float, bool]:
+    """(ttl, de_teste). A variavel de teste tem precedencia; sem nenhuma das duas vale o padrao."""
+    de_teste = _ttl(ambiente.get(TTL_TESTE_VAR), nome=TTL_TESTE_VAR, minimo=TTL_TESTE_MIN_S)
+    if de_teste is not None:
+        return de_teste, True
+    normal = _ttl(ambiente.get("REQUEST_STATE_TTL_S"), nome="REQUEST_STATE_TTL_S", minimo=TTL_MIN_S)
+    return (TTL_PADRAO_S if normal is None else normal), False
 
 
 def _dados_dir(valor: str | None) -> Path:
@@ -119,9 +135,11 @@ def _dados_dir(valor: str | None) -> Path:
 def carregar_config(env: Mapping[str, str] | None = None) -> Config:
     """Le e valida o ambiente. `env` injetavel para teste; padrao os.environ."""
     ambiente = os.environ if env is None else env
+    ttl, ttl_de_teste = _ttl_efetivo(ambiente)
     return Config(
         porta=_porta(ambiente.get("MCP_PORT")),
         dados_dir=_dados_dir(ambiente.get("DADOS_DIR")),
         request_state_secret=validar_segredo(ambiente.get("REQUEST_STATE_SECRET")),
-        request_state_ttl_s=_ttl(ambiente.get("REQUEST_STATE_TTL_S")),
+        request_state_ttl_s=ttl,
+        ttl_de_teste=ttl_de_teste,
     )
