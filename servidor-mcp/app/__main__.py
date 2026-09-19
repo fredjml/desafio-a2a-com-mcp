@@ -7,7 +7,7 @@ import sys
 from .config import ConfigError, carregar_config
 from .data import DadosError
 from .log import emitir
-from .server import servir
+from .server import PortaIndisponivel, servir
 
 
 def main() -> int:
@@ -20,7 +20,7 @@ def main() -> int:
     except DadosError as exc:
         emitir("erro_boot", motivo=str(exc))
         return 2
-    except OSError as exc:
+    except PortaIndisponivel as exc:  # so o bind; um OSError de runtime nao e "porta"
         emitir("erro_boot", motivo=f"nao foi possivel abrir a porta: {exc}")
         return 1
     except KeyboardInterrupt:

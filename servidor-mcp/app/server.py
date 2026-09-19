@@ -24,6 +24,10 @@ VERSAO_SERVIDOR = "1.0.0"
 COMANDO = "python -m app"
 
 
+class PortaIndisponivel(OSError):
+    """Nao foi possivel abrir a porta (ocupada, sem permissao...). So o bind vira este erro (F-11)."""
+
+
 def criar_servidor(config: Config, dados: Dados) -> MCPServer:
     """MCPServer com request_state_security SEMPRE explicito.
 
@@ -87,7 +91,10 @@ def abrir_sockets(porta: int) -> list[socket.socket]:
 
 def servir(config: Config) -> None:
     app = criar_app(config)
-    sockets = abrir_sockets(config.porta)
+    try:
+        sockets = abrir_sockets(config.porta)
+    except OSError as exc:
+        raise PortaIndisponivel(str(exc)) from exc
     escutando = [str(s.getsockname()[0]) for s in sockets]
     emitir(
         "boot",

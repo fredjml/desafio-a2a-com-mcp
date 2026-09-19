@@ -171,7 +171,9 @@ def registrar_reserva(mcp: MCPServer, dados: Dados, agenda: Agenda) -> None:
         responsavel: str,
         escolha: Annotated[ElicitationResult[BaseModel], Resolve(resolvedor)],
     ) -> Annotated[CallToolResult, ReservaOut]:
-        if not isinstance(escolha, AcceptedElicitation):  # decline / cancel
+        # decline/cancel ja saem do resolvedor como `Recusado`; este ramo so cobre um decline entregue
+        # pelo proprio SDK (defesa barata: o resultado correto tambem e "recusada", sem reservar).
+        if not isinstance(escolha, AcceptedElicitation):
             return recusada()
         desfecho = escolha.data
         if isinstance(desfecho, ErroDeExecucao):
@@ -182,8 +184,8 @@ def registrar_reserva(mcp: MCPServer, dados: Dados, agenda: Agenda) -> None:
             alvo = sala
         elif isinstance(desfecho, EscolhaFeita):
             alvo = desfecho.sala
-        else:  # desfecho desconhecido: nunca reservar
-            return resultado_erro(MSG_SEM_ALTERNATIVAS)
+        else:  # inalcancavel (o resolvedor so devolve os tipos de `Desfecho`): erro de programacao
+            raise TypeError(f"desfecho inesperado do resolvedor: {type(desfecho).__name__}")
         try:
             intervalo = validar_pedido(alvo, inicio, fim, ids_das_salas)
         except ErroDeDominio as erro:
