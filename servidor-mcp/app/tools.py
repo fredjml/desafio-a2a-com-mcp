@@ -14,6 +14,9 @@ from mcp_types import CallToolResult, TextContent
 from pydantic import BaseModel
 
 from .data import Dados
+from .policy import ErroDeDominio, validar_pedido
+from .reservations import Agenda
+from .tempo import formatar_instante
 
 
 class SalaOut(BaseModel):
@@ -25,6 +28,19 @@ class SalaOut(BaseModel):
 
 class ListaDeSalas(BaseModel):
     salas: list[SalaOut]
+
+
+class ConflitoOut(BaseModel):
+    id: str
+    inicio: str
+    fim: str
+    responsavel: str
+
+
+class Disponibilidade(BaseModel):
+    sala: str
+    livre: bool
+    conflitos: list[ConflitoOut]
 
 
 def resultado_ok(saida: BaseModel) -> CallToolResult:
@@ -41,7 +57,9 @@ def resultado_erro(mensagem: str) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=mensagem)], is_error=True)
 
 
-def registrar_tools(mcp: MCPServer, dados: Dados) -> None:
+def registrar_tools(mcp: MCPServer, dados: Dados, agenda: Agenda) -> None:
+    ids_das_salas = frozenset(s.id for s in dados.salas)
+
     @mcp.tool(name="listar_salas", description="Lista todas as salas com capacidade e recursos.")
     async def listar_salas() -> Annotated[CallToolResult, ListaDeSalas]:
         return resultado_ok(
@@ -52,5 +70,33 @@ def registrar_tools(mcp: MCPServer, dados: Dados) -> None:
                     )
                     for s in dados.salas
                 ]
+            )
+        )
+
+    @mcp.tool(
+        name="consultar_disponibilidade",
+        description="Diz se uma sala esta livre no intervalo, e quais reservas conflitam.",
+    )
+    async def consultar_disponibilidade(
+        sala: str, inicio: str, fim: str
+    ) -> Annotated[CallToolResult, Disponibilidade]:
+        try:
+            intervalo = validar_pedido(sala, inicio, fim, ids_das_salas)
+        except ErroDeDominio as erro:
+            return resultado_erro(erro.mensagem)
+        conflitos = agenda.conflitos(sala, intervalo)
+        return resultado_ok(
+            Disponibilidade(
+                sala=sala,
+                livre=not conflitos,
+                conflitos=[
+                    ConflitoOut(
+                        id=r.id,
+                        inicio=formatar_instante(r.inicio),
+                        fim=formatar_instante(r.fim),
+                        responsavel=r.responsavel,
+                    )
+                    for r in conflitos
+                ],
             )
         )

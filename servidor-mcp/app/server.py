@@ -13,6 +13,8 @@ from starlette.types import ASGIApp
 from .config import Config
 from .data import Dados, carregar_dados
 from .log import RegistroDeRequests, emitir
+from .reservations import Agenda
+from .resources import registrar_resources
 from .tools import registrar_tools
 
 # O nome entra no `aud` do requestState selado: FIXO, senao um restart/rename invalida os estados.
@@ -36,7 +38,8 @@ def criar_servidor(config: Config, dados: Dados) -> MCPServer:
         ),
         log_level="WARNING",  # o SDK nao loga request; evita ruido no stderr
     )
-    registrar_tools(mcp, dados)
+    registrar_tools(mcp, dados, Agenda(dados.reservas))
+    registrar_resources(mcp, dados)
     return mcp
 
 
