@@ -200,7 +200,7 @@ async def test_resposta_ok_sem_reservado_nao_vira_completed() -> None:
     [
         "quero uma sala",
         "reservar sala=sala-porao",
-        f"reservar sala=s inicio=amanha fim={h('10:00')} responsavel=Doc",
+        f"reservar sala=s inicio={h('09:00')} responsavel=Doc",
         f"reservar sala=s inicio={h('09:00')} fim={h('10:00')} responsavel=Doc\nsala=sala-delorean",
         "escolha=sala-fusca",
     ],

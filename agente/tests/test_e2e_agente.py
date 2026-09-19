@@ -227,10 +227,35 @@ def test_erros_de_dominio_do_servidor_chegam_exatos(
 
 
 def test_pedido_invalido_nao_chega_ao_mcp(amb: Ambiente) -> None:
-    r = amb.enviar("reservar sala=sala-aquario inicio=amanha fim=depois responsavel=Doc")
+    r = amb.enviar("reservar sala=sala-aquario inicio=amanha responsavel=Doc")
     assert estado(r) == "TASK_STATE_FAILED" and mensagem(r).startswith("Pedido invalido: ")
     assert amb.mcp.requests() == []  # nem tools/list: o MCP nao foi tocado
 
+
+ERRO_FORMATO = "Formato invalido: inicio e fim devem ser ISO 8601 com fuso"
+
+
+@pytest.mark.parametrize(
+    ("ini", "fim"),
+    [
+        ("2026-11-03T09:00:00", "2026-11-03T10:00:00"),  # sem fuso
+        ("amanha", "depois"),  # lixo
+        ("2026-13-45T09:00:00-03:00", "2026-11-03T10:00:00-03:00"),  # data impossivel
+        ("2026-11-03T09:00:00-0300", "2026-11-03T10:00:00-03:00"),  # fuso sem dois-pontos
+    ],
+)
+def test_instante_invalido_e_recusado_pelo_servidor_nao_pelo_agente(
+    amb: Ambiente, ini: str, fim: str
+) -> None:
+    """Sem regra de dominio no agente: o pedido segue ao MCP e a mensagem exata e a do servidor."""
+    r = amb.enviar(f"reservar sala=sala-aquario inicio={ini} fim={fim} responsavel=Doc")
+    t = tarefa(r)
+    assert estado(r) == "TASK_STATE_FAILED" and mensagem(r) == ERRO_FORMATO
+    assert t["history"][-1]["parts"] == [{"text": ERRO_FORMATO}]
+    assert "tools/call" in amb.proxy.metodos()  # o agente repassou (nao barrou); o servidor decidiu
+    chamada = next(q["json"] for q in amb.proxy.requests if q["json"]["method"] == "tools/call")
+    args = chamada["params"]["arguments"]
+    assert args["inicio"] == ini and args["fim"] == fim  # verbatim
 
 def test_determinismo_mesma_resposta_exceto_ids_t17(amb: Ambiente) -> None:
     def normal(r: dict[str, Any]) -> str:

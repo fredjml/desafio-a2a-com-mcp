@@ -7,7 +7,9 @@ Formato aceito (uma unica linha; `\\r\\n` final tolerado; chaves em qualquer ord
 `responsavel` pode ter espacos: vale o texto ate a proxima chave conhecida ou o fim da linha.
 Chave desconhecida, duplicada, ausente, valor vazio ou quebra de linha embutida = erro claro, e o
 MCP nem e chamado. Validar existencia da sala, janela, duracao ou intervalo e trabalho do SERVIDOR.
-A checagem de ISO 8601 aqui e so de FORMA (para nao repassar lixo); o valor e repassado verbatim.
+`inicio` e `fim` sao repassados VERBATIM: o agente nao valida instante, fuso nem forma de data. O servidor
+e o unico dono dessa validacao ("Formato invalido: inicio e fim devem ser ISO 8601 com fuso"); a mensagem
+dele chega ao cliente A2A na Task FAILED via `isError` da tool.
 """
 
 from __future__ import annotations
@@ -15,7 +17,6 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 FORMATO = "reservar sala=<id> inicio=<iso> fim=<iso> responsavel=<nome>"
 CAMPOS = ("sala", "inicio", "fim", "responsavel")
@@ -23,9 +24,6 @@ MAX_TEXTO = 1000
 MAX_CAMPO = 200
 
 _CHAVE = re.compile(r"(?<!\S)([A-Za-z_][A-Za-z0-9_]*)=")
-_ISO = re.compile(
-    r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:[.,]\d{1,9})?)?(Z|[+-]\d{2}:\d{2})?"
-)
 _CONTROLE = re.compile(r"[\x00-\x1f\x7f\u2028\u2029\x85]")
 
 
@@ -69,22 +67,6 @@ def _linha_unica(texto: str, erro: Callable[[str], PedidoInvalido] = _erro) -> s
     return corpo
 
 
-def _iso_de_forma(campo: str, valor: str) -> None:
-    achou = _ISO.fullmatch(valor)
-    if achou is None:
-        raise _erro(f"{campo} nao e um instante ISO 8601 (ex.: 2026-11-03T14:00:00-03:00)")
-    ano, mes, dia, hora, minuto, segundo = (int(g or 0) for g in achou.groups()[:6])
-    try:
-        datetime(ano, mes, dia, hora, minuto, segundo, tzinfo=timezone.utc)
-    except ValueError:
-        raise _erro(f"{campo} nao e um instante ISO 8601 valido") from None
-    zona = achou.group(7)
-    if zona and zona != "Z":
-        h, m = int(zona[1:3]), int(zona[4:6])
-        if h > 23 or m > 59:
-            raise _erro(f"{campo} tem fuso horario invalido")
-
-
 def parse_pedido(texto: str) -> Pedido:
     """`reservar ...` -> Pedido, ou PedidoInvalido com mensagem clara."""
     corpo = _linha_unica(texto)
@@ -115,8 +97,6 @@ def parse_pedido(texto: str) -> Pedido:
     faltando = [c for c in CAMPOS if c not in valores]
     if faltando:
         raise _erro("faltando " + ", ".join(faltando))
-    _iso_de_forma("inicio", valores["inicio"])
-    _iso_de_forma("fim", valores["fim"])
     return Pedido(
         sala=valores["sala"],
         inicio=valores["inicio"],

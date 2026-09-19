@@ -191,10 +191,15 @@ def test_valor_vazio(campo: str) -> None:
         "'2026-11-03T14:00:00'",
     ],
 )
-def test_iso_invalido(ruim: str) -> None:
+def test_datas_sao_repassadas_verbatim_o_servidor_e_o_dono_da_validacao(ruim: str) -> None:
+    """O agente so traduz: sem fuso, lixo ou data impossivel passam intactos ao servidor."""
     for campo in ("inicio", "fim"):
-        m = invalido(montar(CAMPOS, **{campo: ruim}))
-        assert campo in m and "ISO 8601" in m or "fuso" in m
+        assert parse_pedido(montar(CAMPOS, **{campo: ruim})).argumentos()[campo] == ruim
+
+
+def test_iso_sem_fuso_nao_e_recusado_pelo_agente() -> None:
+    sem_fuso = "2026-11-03T14:00:00"
+    assert parse_pedido(montar(CAMPOS, inicio=sem_fuso, fim=sem_fuso)).inicio == sem_fuso
 
 
 @pytest.mark.parametrize("campo", ["sala", "inicio", "fim"])
@@ -202,7 +207,7 @@ def test_texto_solto_dentro_de_valor_simples(campo: str) -> None:
     assert "espacos" in invalido(montar(CAMPOS, **{campo: campos()[campo] + " lixo"}))
 
 
-def test_data_e_hora_separadas_por_espaco_nao_e_iso() -> None:
+def test_data_e_hora_separadas_por_espaco_sao_texto_solto_no_formato() -> None:
     assert "espacos" in invalido(montar(CAMPOS, inicio="2026-11-03 14:00:00"))
 
 
