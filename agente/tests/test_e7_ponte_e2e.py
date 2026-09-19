@@ -367,9 +367,8 @@ def test_a_mesma_pausa_duas_vezes_e_identica_byte_a_byte_t17(s: Sessao) -> None:
 def test_servidor_reiniciado_com_a_mesma_chave_o_estado_selado_sobrevive_e_a_task_termina(
     s: Sessao, segredo: str
 ) -> None:
-    """Restart do MCP entre a pausa e a escolha, MESMO segredo: o estado selado segue valido. O agente
-    termina a Task de forma definitiva (COMPLETED, ou FAILED com erro claro se a conexao obsoleta
-    falhar antes): NUNCA fica em WORKING."""
+    """Restart do MCP entre a pausa e a escolha, MESMO segredo: o estado selado segue valido e a Task
+    TERMINA em COMPLETED (F-05: nao tolera FAILED; o pedido de retomada refaz a conexao sozinho)."""
     tid = s.pausar("sala-garagem", "14:00", "15:00", "Marty", TRACEPARENT)
     porta = s.amb.mcp.porta
     s.amb.mcp.parar()
@@ -377,12 +376,9 @@ def test_servidor_reiniciado_com_a_mesma_chave_o_estado_selado_sobrevive_e_a_tas
     try:
         novo.esperar_porta(porta)
         r = s.enviar("escolha=sala-mirante", task_id=tid)
-        assert estado(r) in {"TASK_STATE_COMPLETED", "TASK_STATE_FAILED"}, r
-        if estado(r) == "TASK_STATE_COMPLETED":
-            assert artifact(r)["sala"] == "sala-mirante" and artifact(r)["responsavel"] == "Marty"
-            assert "tools/call" in [x["method"] for x in novo.requests()]
-        else:
-            assert "Servidor MCP" in mensagem(r) or "conexao" in mensagem(r)
+        assert estado(r) == "TASK_STATE_COMPLETED", r
+        assert artifact(r)["sala"] == "sala-mirante" and artifact(r)["responsavel"] == "Marty"
+        assert "tools/call" in [x["method"] for x in novo.requests()]
         assert estado(s.get(tid)) == estado(r)  # terminal
         assert "error" in s.enviar("escolha=sala-mirante", task_id=tid)  # e definitivo
         # o agente segue util: uma Task nova pausa e conclui

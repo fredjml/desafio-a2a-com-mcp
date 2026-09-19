@@ -13,7 +13,11 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from a2a.server.agent_execution import AgentExecutor, SimpleRequestContextBuilder
+from a2a.server.agent_execution import (
+    AgentExecutor,
+    RequestContext,
+    SimpleRequestContextBuilder,
+)
 from a2a.server.context import ServerCallContext
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import DefaultServerCallContextBuilder, create_agent_card_routes
@@ -25,9 +29,11 @@ from a2a.types.a2a_pb2 import (
     AgentInterface,
     AgentProvider,
     AgentSkill,
+    SendMessageRequest,
     Task,
     TaskState,
 )
+from a2a.utils.errors import InvalidParamsError
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.routing import Route
@@ -189,6 +195,36 @@ class TaskStoreCoerente(InMemoryTaskStore):
         return len(self._estados)
 
 
+class ConstrutorDeContextoConferido(SimpleRequestContextBuilder):
+    """Recusa `SendMessage` cujo `contextId` explicito nao e o da Task indicada por `taskId`.
+
+    A2A v1.0 manda recusar; o SDK 1.1.4 (handler v2) nao confere e o executor nao consegue distinguir o
+    contextId enviado do gerado (a mensagem e carimbada). Aqui o `context_id` recebido ainda e o do
+    CLIENTE (vazio se omitido: entao vale o da Task). Erro -32602 bem-formado, antes de tocar no
+    PausedState ou no MCP.
+    """
+
+    def __init__(self, loja: TaskStore, **kwargs: Any) -> None:
+        super().__init__(task_store=loja, **kwargs)
+        self._loja = loja
+
+    async def build(
+        self,
+        context: ServerCallContext,
+        params: SendMessageRequest | None = None,
+        task_id: str | None = None,
+        context_id: str | None = None,
+        task: Task | None = None,
+    ) -> RequestContext:
+        if task_id and context_id:
+            existente = task or await self._loja.get(task_id, context)
+            if existente is not None and existente.context_id != context_id:
+                raise InvalidParamsError(message=f"contextId nao corresponde ao da Task {task_id}")
+        return await super().build(
+            context=context, params=params, task_id=task_id, context_id=context_id, task=task
+        )
+
+
 class App:
     """Agrupa o que o processo e os testes precisam (host MCP, executor, ASGI)."""
 
@@ -216,9 +252,9 @@ class App:
             agent_executor=self.executor,
             task_store=self.task_store,
             agent_card=self.card,
-            request_context_builder=SimpleRequestContextBuilder(
+            request_context_builder=ConstrutorDeContextoConferido(
+                self.task_store,
                 should_populate_referred_tasks=False,
-                task_store=self.task_store,
                 task_id_generator=GeradorComPrefixo("task-"),
                 context_id_generator=GeradorComPrefixo("ctx-"),
             ),

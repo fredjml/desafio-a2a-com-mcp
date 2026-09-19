@@ -10,8 +10,12 @@ Decisoes (DEC-04/DEC-25, spikes S1/S2):
   so para anunciar a capability: nunca e invocado no caminho `allow_input_required=True`
   (um teste prova) e, se um dia for, responde erro em vez de escolher pelo usuario.
 - O `Client` e aberto/fechado por UMA tarefa dona (o `async with` do anyio nao pode atravessar
-  tarefas): as tarefas de request so usam `client.session`. Apos erro de transporte/timeout o
-  cliente e recriado (R-ARQ-02); erros de protocolo devolvidos pelo servidor NAO o recriam.
+  tarefas): as tarefas de request so usam `client.session`. Apos erro de TRANSPORTE/timeout o
+  cliente e recriado (R-ARQ-02); erros de protocolo devolvidos pelo servidor e erros logicos
+  (ferramenta ausente, resposta ou politica invalida) NAO o recriam (F-02).
+- Um Client novo recomeca os ids JSON-RPC em 1: `evitar_ids` garante que o retry de uma pausa feita
+  por um Client anterior nao reutilize o id da chamada inicial (id novo, regra do enunciado).
+- Um unico timeout (`asyncio.wait_for`, `MCP_TIMEOUT_S`); excecoes traduzidas so por tipo (F-04).
 - O `requestState` e opaco: passa daqui para o servidor sem ser aberto, logado ou exposto.
 """
 
@@ -23,6 +27,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 from mcp import Client, MCPError
 from mcp_types import (
     CONNECTION_CLOSED,
@@ -35,6 +40,7 @@ from mcp_types import (
     InputRequiredResult,
     TextResourceContents,
 )
+from pydantic import ValidationError
 
 from .log import emitir
 from .trace import traceparent_para
@@ -44,6 +50,13 @@ NOME_CLIENTE = "agente-central-de-salas"
 VERSAO_CLIENTE = "1.0.0"
 URI_POLITICA = "politica://uso"
 _VERSAO_POLITICA = re.compile(r"versao:[ \t]*([A-Za-z0-9][A-Za-z0-9._-]{0,63})[ \t]*")
+# Falhas de TRANSPORTE que o host traduz (F-04: nada de `except Exception`; um bug de programacao
+# deve propagar ate o executor, que loga o traceback). `asyncio.TimeoutError` so e alias de
+# `TimeoutError` a partir do Python 3.11.
+_ERROS_DE_TRANSPORTE = (MCPError, httpx.HTTPError, OSError, asyncio.TimeoutError)
+TIPOS_DE_TRANSPORTE = frozenset({"conexao", "timeout"})
+# Ao trocar de Client, ids recem-emitidos ate esta distancia do id da chamada original sao "queimados".
+JANELA_DE_IDS = 8
 
 
 class McpHostError(Exception):
@@ -53,6 +66,11 @@ class McpHostError(Exception):
         super().__init__(mensagem)
         self.tipo = tipo
         self.mensagem = mensagem
+
+    @property
+    def transporte(self) -> bool:
+        """Falha de transporte (conexao/timeout): o servidor pode voltar e o pedido ser reenviado."""
+        return self.tipo in TIPOS_DE_TRANSPORTE
 
 
 class McpProtocolError(McpHostError):
@@ -84,6 +102,9 @@ class _Ciclo:
     parar: asyncio.Event = field(default_factory=asyncio.Event)
     dono: asyncio.Task[None] | None = None
     ferramentas: frozenset[str] = frozenset()
+    # Requests com id enviados por este Client. O SDK numera 1, 2, 3...; logo isto e o maior id ja usado
+    # (cota superior, com chamadas concorrentes).
+    enviados: int = 0
 
     def vivo(self) -> Client:
         if self.client is None:
@@ -100,6 +121,11 @@ class McpHost:
         # Quantas vezes a fachada de elicitation foi invocada: DEVE ser sempre 0 (T-12).
         self.invocacoes_da_fachada = 0
         self.clientes_criados = 0
+
+    @property
+    def ids_emitidos(self) -> int:
+        """Requests com id enviados pelo Client vivo (0 se nao ha): cota superior do maior id usado."""
+        return self._ciclo.enviados if self._ciclo is not None else 0
 
     @property
     def geracao(self) -> int:
@@ -131,7 +157,6 @@ class McpHost:
                 mode=MODO_MCP,
                 client_info=Implementation(name=NOME_CLIENTE, version=VERSAO_CLIENTE),
                 elicitation_callback=self._fachada_elicitation,
-                read_timeout_seconds=self._timeout_s,
                 cache=None,  # cada leitura vai ao servidor (politica por Task; ttlMs e 0 mesmo)
             ) as client:
                 ciclo.client = client
@@ -140,7 +165,7 @@ class McpHost:
         except asyncio.CancelledError:
             ciclo.erro = ciclo.erro or RuntimeError("cancelado")
             raise
-        except Exception as exc:  # noqa: BLE001 - guardado e traduzido por quem abriu o ciclo
+        except _ERROS_DE_TRANSPORTE as exc:  # guardado e traduzido por quem abriu o ciclo
             ciclo.erro = exc
         finally:
             ciclo.client = None
@@ -148,8 +173,16 @@ class McpHost:
 
     async def _abrir(self) -> _Ciclo:
         ciclo = _Ciclo()
-        ciclo.dono = asyncio.create_task(self._dono(ciclo), name="mcp-host-dono")
-        await asyncio.wait_for(ciclo.pronto.wait(), self._timeout_s)
+        dono = asyncio.create_task(self._dono(ciclo), name="mcp-host-dono")
+        ciclo.dono = dono
+        try:
+            await asyncio.wait_for(ciclo.pronto.wait(), self._timeout_s)
+        except asyncio.TimeoutError:
+            dono.cancel()  # F-12: a tarefa dona nao pode ficar viva sem dono
+            await asyncio.gather(dono, return_exceptions=True)
+            raise McpHostError(
+                "timeout", "Servidor MCP nao respondeu a tempo ao abrir o cliente"
+            ) from None
         if ciclo.client is None:
             raise McpHostError("conexao", "Nao foi possivel abrir o cliente MCP")
         self.clientes_criados += 1
@@ -187,12 +220,13 @@ class McpHost:
                 return self._ciclo
             ciclo = await self._abrir()
             try:
+                ciclo.enviados += 1
                 listagem = await asyncio.wait_for(
                     ciclo.vivo().list_tools(meta=self._meta(trace_id)),  # type: ignore[arg-type]
                     self._timeout_s,
                 )
                 ciclo.ferramentas = frozenset(t.name for t in listagem.tools)
-            except Exception as exc:  # noqa: BLE001 - traduzido em McpHostError
+            except (McpHostError, ValidationError, *_ERROS_DE_TRANSPORTE) as exc:
                 await self._fechar(ciclo)
                 raise self._traduzir(exc, "tools/list") from None
             self._ciclo = ciclo
@@ -214,10 +248,8 @@ class McpHost:
             return McpProtocolError(int(exc.code), str(exc.error.message)[:300])
         if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
             return McpHostError("timeout", f"Servidor MCP nao respondeu a tempo em {etapa}")
-        if isinstance(exc, asyncio.CancelledError):
-            raise exc
-        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-            raise exc
+        if isinstance(exc, ValidationError):  # resposta do servidor fora do formato do protocolo
+            return McpHostError("resposta_invalida", f"Resposta MCP invalida em {etapa}")
         return McpHostError(
             "conexao", f"Servidor MCP indisponivel em {etapa} ({type(exc).__name__})"
         )
@@ -225,7 +257,10 @@ class McpHost:
     async def _executar(
         self, etapa: str, trace_id: str | None, operacao: Any, *, repetir_uma_vez: bool
     ) -> Any:
-        """Roda `operacao(client)` com timeout; em falha de transporte descarta o cliente (R-ARQ-02).
+        """Roda `operacao(client)` com timeout; em falha de TRANSPORTE descarta o cliente (R-ARQ-02).
+
+        Erro logico (ferramenta ausente, resposta invalida, politica invalida) e erro de protocolo
+        devolvido pelo servidor NAO recriam o Client (F-02): o Client segue saudavel.
 
         `repetir_uma_vez`: so para operacoes de leitura (tools/list ja ocorreu em `_garantir`,
         resources/read): uma conexao obsoleta (servidor reiniciado) e refeita 1x. `tools/call`
@@ -242,10 +277,11 @@ class McpHost:
                     raise
                 continue
             try:
+                # Este e o UNICO timeout efetivo do host (F-12); o SDK nao tem outro configurado.
                 return await asyncio.wait_for(operacao(ciclo), self._timeout_s)
-            except Exception as exc:  # noqa: BLE001 - traduzido em McpHostError
+            except (McpHostError, ValidationError, *_ERROS_DE_TRANSPORTE) as exc:
                 erro = self._traduzir(exc, etapa)
-                if isinstance(erro, McpProtocolError):
+                if not erro.transporte:
                     raise erro from None
                 await self._invalidar(ciclo, f"{erro.tipo}:{etapa}")
                 ultimo = erro
@@ -256,6 +292,7 @@ class McpHost:
         """Le `politica://uso` e extrai `versao:` da 1a linha. Chamado a CADA Task."""
 
         async def ler(ciclo: _Ciclo) -> str:
+            ciclo.enviados += 1
             resposta = await ciclo.vivo().session.read_resource(
                 URI_POLITICA,
                 meta=self._meta(trace_id),  # type: ignore[arg-type]
@@ -288,10 +325,10 @@ class McpHost:
                 raise McpHostError(
                     "ferramenta_ausente", f"O servidor MCP nao oferece a ferramenta {nome}"
                 )
+            ciclo.enviados += 1
             resultado = await ciclo.vivo().session.call_tool(
                 nome,
                 argumentos,
-                read_timeout_seconds=self._timeout_s,
                 meta=self._meta(trace_id),  # type: ignore[arg-type]
                 input_responses=input_responses,  # type: ignore[arg-type]
                 request_state=request_state,
@@ -305,6 +342,29 @@ class McpHost:
             "tools/call", trace_id, chamar, repetir_uma_vez=False
         )
         return resposta
+
+    async def evitar_ids(
+        self, geracao_origem: int, ids_ate: int, trace_id: str | None = None
+    ) -> bool:
+        """O retry NAO pode reutilizar o id da chamada original (id novo, regra do enunciado).
+
+        Mesmo Client: o contador e monotonico, nada a fazer. Client recriado: os ids recomecam em 1 e
+        o proximo pode cair perto de `ids_ate` (o maior id do Client anterior na chamada original); se
+        cair, "queima" ids com `tools/list` ate passar dele. False se nao deu para garantir.
+        """
+        if geracao_origem == self.geracao:
+            return True
+
+        async def queimar(ciclo: _Ciclo) -> None:
+            ciclo.enviados += 1
+            await ciclo.vivo().list_tools(meta=self._meta(trace_id))  # type: ignore[arg-type]
+
+        for _ in range(JANELA_DE_IDS + 1):
+            ciclo = await self._garantir(trace_id)
+            if not ids_ate - JANELA_DE_IDS <= ciclo.enviados + 1 <= ids_ate:
+                return True
+            await self._executar("tools/list", trace_id, queimar, repetir_uma_vez=False)
+        return False
 
     @staticmethod
     def _meta(trace_id: str | None) -> dict[str, str] | None:

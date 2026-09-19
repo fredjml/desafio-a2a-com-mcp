@@ -327,9 +327,8 @@ async def test_iserror_no_retry_falha_a_task_com_a_mensagem_exata_e_limpa_o_esta
 @pytest.mark.parametrize(
     "erro",
     [
-        McpHostError("timeout", "Servidor MCP nao respondeu a tempo em tools/call"),
-        McpHostError("conexao", "Servidor MCP indisponivel em tools/call"),
         McpProtocolError(-32602, "Invalid or expired requestState"),
+        McpHostError("politica_invalida", "O recurso politica://uso nao traz 'versao:'"),
     ],
 )
 async def test_falha_do_mcp_no_retry_termina_a_task_com_erro_claro_nunca_em_working(
@@ -348,14 +347,15 @@ async def test_falha_do_mcp_no_retry_termina_a_task_com_erro_claro_nunca_em_work
     assert ESTADO_OPACO not in json.dumps(r)
 
 
-async def test_falha_ao_ler_a_politica_na_retomada_falha_a_task_sem_chamar_a_tool() -> None:
+async def test_politica_invalida_na_retomada_falha_a_task_sem_chamar_a_tool() -> None:
+    # (falha de TRANSPORTE ao ler a politica mantem a pausa: ver test_correcoes_robustez.py, F-01)
     host = HostFalso([pergunta()])
     app = app_com(host)
     async with cliente_asgi(app) as c:
         tid = await pausar(c, host)
-        host.versao = McpHostError("conexao", "Servidor MCP indisponivel em resources/read")  # type: ignore[assignment]
+        host.versao = McpHostError("politica_invalida", "O recurso nao traz 'versao:'")  # type: ignore[assignment]
         r = await enviar(c, "escolha=sala-mirante", tid)
-    assert estado(r) == "TASK_STATE_FAILED" and "indisponivel" in mensagem_de(r)
+    assert estado(r) == "TASK_STATE_FAILED" and "versao" in mensagem_de(r)
     assert len(host.chamadas) == 1 and len(app.pausadas) == 0
 
 
@@ -367,7 +367,7 @@ async def test_resposta_do_retry_que_nao_e_reserva_falha_a_task() -> None:
     assert estado(r) == "TASK_STATE_FAILED" and "inesperada" in mensagem_de(r)
 
 
-async def test_cliente_mcp_recriado_desde_a_pausa_falha_a_task_sem_enviar_o_retry() -> None:
+async def test_cliente_mcp_recriado_sem_garantia_de_ids_falha_a_task_sem_enviar_o_retry() -> None:
     host = HostFalso([pergunta(), reserva_ok()])
     app = app_com(host)
     async with cliente_asgi(app) as c:
@@ -375,6 +375,7 @@ async def test_cliente_mcp_recriado_desde_a_pausa_falha_a_task_sem_enviar_o_retr
         host.geracao += (
             1  # o Client foi recriado: os ids recomecam (risco de colidir com o inicial)
         )
+        host.ids_ok = False  # e o host nao conseguiu garantir um id novo (`evitar_ids`)
         r = await enviar(c, "escolha=sala-mirante", tid)
         g = await rpc(c, "GetTask", {"id": tid})
     assert estado(r) == "TASK_STATE_FAILED" and mensagem_de(r) == MSG_CLIENTE_RECRIADO

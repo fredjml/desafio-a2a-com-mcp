@@ -10,19 +10,21 @@ Terminal (COMPLETED/FAILED/CANCELED) e definitivo: o SDK recusa SendMessage para
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import secrets
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from a2a.helpers import new_task_from_user_message
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.id_generator import IDGenerator, IDGeneratorContext
 from a2a.server.tasks import TaskUpdater
-from a2a.types.a2a_pb2 import Message, Part, TaskState
+from a2a.types.a2a_pb2 import Message, Part, Role, Task, TaskState, TaskStatus
 from a2a.utils.errors import InvalidParamsError
 from mcp_types import (
     CallToolResult,
@@ -35,7 +37,7 @@ from mcp_types import (
 
 from .log import emitir
 from .mcp_host import McpHostError
-from .parser import PedidoInvalido, parse_escolha, parse_pedido
+from .parser import FORMATO, PedidoInvalido, parse_escolha, parse_pedido
 from .trace import novo_trace_id, trace_da_task, trace_id_de
 
 FERRAMENTA_RESERVA = "reservar_sala"
@@ -58,6 +60,8 @@ MSG_CLIENTE_RECRIADO = (
     "A conexao com o servidor MCP foi refeita desde a pausa e a escolha nao foi enviada, para "
     "nao repetir um id de requisicao. Envie um novo pedido."
 )
+MSG_INTERROMPIDO = "Processamento interrompido antes de concluir; reenvie o pedido."
+MSG_SO_USUARIO = "a mensagem deve ter role ROLE_USER"
 ESCOLHA_RECUSAR = "recusar"
 
 
@@ -79,7 +83,8 @@ class PausedState:
     Nunca e serializado para o cliente A2A. `request_state` e opaco (guardar e ecoar; nunca abrir).
     Preenchido quando o MCP devolve `InputRequiredResult`; atualizado a cada nova rodada (R-BR-07).
     `campo` = nome da propriedade do formulario recebido (a resposta e `{campo: escolha}`);
-    `geracao_cliente` = geracao do Client MCP que fez a chamada (ver `McpHost.geracao`).
+    `geracao_cliente` = geracao do Client MCP que fez a chamada (ver `McpHost.geracao`) e `ids_ate` = o
+    maior id JSON-RPC que aquele Client ja havia usado (ver `McpHost.evitar_ids`).
     """
 
     task_id: str
@@ -92,6 +97,7 @@ class PausedState:
     trace_id: str
     campo: str = "sala"
     geracao_cliente: int = 0
+    ids_ate: int = 0
     rodada: int = 1
 
 
@@ -144,6 +150,17 @@ class ServicoMcp(Protocol):
     @property
     def geracao(self) -> int:
         """Geracao do Client MCP que atenderia uma chamada agora (muda quando o Client e recriado)."""
+        ...
+
+    @property
+    def ids_emitidos(self) -> int:
+        """Requests com id enviados pelo Client vivo (cota superior do maior id ja usado)."""
+        ...
+
+    async def evitar_ids(
+        self, geracao_origem: int, ids_ate: int, trace_id: str | None = None
+    ) -> bool:
+        """True se o proximo id do retry nao coincide com o da chamada original (Client recriado)."""
         ...
 
     async def versao_da_politica(self, trace_id: str | None = None) -> str: ...
@@ -309,6 +326,16 @@ class _Saida:
         self.pausada = True
 
 
+def _task_inicial(mensagem: Message, task_id: str, context_id: str) -> Task:
+    """A Task SUBMITTED com a mensagem do usuario no historico (o 1o evento do executor)."""
+    return Task(
+        status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+        id=task_id,
+        context_id=context_id,
+        history=[mensagem],
+    )
+
+
 class ExecutorReservas(AgentExecutor):
     def __init__(self, mcp: ServicoMcp, pausadas: PausedRegistry | None = None) -> None:
         self._mcp = mcp
@@ -339,25 +366,51 @@ class ExecutorReservas(AgentExecutor):
         nova = atual is None
         if nova:
             # O 1o evento DEVE ser a Task (senao o SDK rejeita: "Agent should enqueue Task before ...").
-            await event_queue.enqueue_event(new_task_from_user_message(mensagem))
+            # Montada aqui, e nao por `new_task_from_user_message`, que levanta ValueError (=> -32603 com
+            # traceback e Task orfa) para texto vazio ou role != USER: esses casos viram FAILED com
+            # mensagem clara em `_nova`.
+            await event_queue.enqueue_event(_task_inicial(mensagem, task_id, context_id))
+        interrompida = False
         try:
             await upd.start_work()
             if nova:
                 await self._nova(context, saida)
             else:
                 await self._continuacao(context, saida)
-        except Exception as exc:  # noqa: BLE001 - a Task nunca pode ficar em WORKING
-            emitir("erro", task=task_id, tipo=type(exc).__name__)
+        except asyncio.CancelledError:
+            # F-15: cancelamento (shutdown/cliente): a Task nao fica em WORKING. Se nem isso der para
+            # publicar, o PausedState e preservado (ver `finally`).
+            interrompida = True
+            if not saida.encerrada and not saida.pausada:
+                with contextlib.suppress(Exception):  # melhor esforco: ja estamos cancelados
+                    await saida.falhou(MSG_INTERROMPIDO)
+            raise
+        except Exception:  # noqa: BLE001 - ultima rede (F-04): a Task nunca pode ficar em WORKING
+            # Bug de programacao (tipos de infraestrutura ja viram McpHostError no host): loga o
+            # traceback, sem o requestState, e responde so "Erro interno".
+            emitir("erro", task=task_id, traceback=self._traceback_sem_estado(task_id))
             if not saida.encerrada:
                 await saida.falhou(MSG_ERRO_INTERNO)
         finally:
-            if not saida.pausada:  # terminal (ou falha): o estado da ponte nao sobrevive
+            # terminal (ou falha): o estado da ponte nao sobrevive; cancelado sem publicar o fim, fica
+            if not saida.pausada and (saida.encerrada or not interrompida):
                 self.pausadas.limpar(task_id)
+
+    def _traceback_sem_estado(self, task_id: str) -> str:
+        """Traceback da excecao corrente, sem o `requestState` (opaco) da Task, limitado em tamanho."""
+        texto = traceback.format_exc()
+        estado = self.pausadas.obter(task_id)
+        if estado is not None and estado.request_state:
+            texto = texto.replace(estado.request_state, "<requestState omitido>")
+        return texto[-6000:]
 
     async def _nova(self, context: RequestContext, saida: _Saida) -> None:
         texto = context.get_user_input()
         # R-HOST-03/DEC-19: o trace-id da Task e fixado no 1o pedido; header invalido = ignorado.
         trace_id = trace_id_de(traceparent_do_request(context)) or novo_trace_id()
+        if context.message is not None and context.message.role != Role.ROLE_USER:
+            await saida.falhou(f"Pedido invalido: {MSG_SO_USUARIO}. Formato: {FORMATO}")
+            return
         try:
             pedido = parse_pedido(texto)
         except PedidoInvalido as exc:
@@ -414,6 +467,7 @@ class ExecutorReservas(AgentExecutor):
                 trace_id=trace_id,
                 campo=pergunta.campo,
                 geracao_cliente=self._mcp.geracao,
+                ids_ate=self._mcp.ids_emitidos,
             )
         )
         emitir(
@@ -429,6 +483,10 @@ class ExecutorReservas(AgentExecutor):
             await saida.falhou(MSG_SEM_ESTADO)
             return
         lista = texto_alternativas(estado.enum)
+        if context.message is not None and context.message.role != Role.ROLE_USER:
+            emitir("ponte", acao="resposta_invalida", task=task_id)
+            await saida.pausou(f"Resposta invalida: {MSG_SO_USUARIO}.\n{lista}")
+            return
         # R-HOST-03/DEC-19: o trace-id da Task foi fixado no 1o pedido; um traceparent novo NAO o troca.
         trace_id, ignorado = trace_da_task(estado.trace_id, traceparent_do_request(context))
         if ignorado:
@@ -452,8 +510,11 @@ class ExecutorReservas(AgentExecutor):
         try:
             # A politica vem do resource, lida NESTA Task, antes do retry (que pode criar a reserva).
             politica = await self._mcp.versao_da_politica(trace_id) if aceita else ""
-            if self._mcp.geracao != estado.geracao_cliente:
-                # Um Client novo recomeca os ids em 1: o retry poderia repetir o id da chamada inicial.
+            if self._mcp.geracao != estado.geracao_cliente and not await self._mcp.evitar_ids(
+                estado.geracao_cliente, estado.ids_ate, trace_id
+            ):
+                # Client recriado desde a pausa (ids recomecam em 1) e nao deu para garantir que o retry
+                # use um id diferente do da chamada inicial: nao envia (F-02).
                 emitir("ponte", acao="cliente_recriado", task=task_id)
                 await saida.falhou(MSG_CLIENTE_RECRIADO)
                 return
@@ -467,7 +528,13 @@ class ExecutorReservas(AgentExecutor):
             )
         except McpHostError as exc:
             emitir("mcp_falha", task=task_id, tipo=exc.tipo)
-            await saida.falhou(mensagem_de_falha_mcp(exc))
+            if exc.transporte:
+                # F-01: falha de TRANSPORTE (conexao/timeout): o requestState ainda vale no servidor e o
+                # PausedState fica INTACTO; a Task segue INPUT_REQUIRED para o usuario reenviar. O retry
+                # pode ate ter chegado: o servidor revalida e nao duplica a reserva.
+                await saida.pausou(f"Servidor MCP indisponivel; reenvie escolha={valor}")
+                return
+            await saida.falhou(mensagem_de_falha_mcp(exc))  # protocolo (-32602 etc.) ou erro logico
             return
 
         if isinstance(resultado, InputRequiredResult):  # nova rodada (R-BR-07): segue pausada
@@ -482,6 +549,8 @@ class ExecutorReservas(AgentExecutor):
                     campo=pergunta.campo,
                     enum=list(pergunta.opcoes),
                     request_state=pergunta.request_state,
+                    geracao_cliente=self._mcp.geracao,
+                    ids_ate=self._mcp.ids_emitidos,
                     rodada=estado.rodada + 1,
                 )
             )

@@ -77,10 +77,19 @@ class HostFalso:
         self.leituras_de_politica: list[str | None] = []
         self.invocacoes_da_fachada = 0
         self.geracao = 1  # geracao do Client MCP (ver McpHost.geracao); testes podem alterar
+        self.ids_emitidos = 3  # maior id ja usado pelo Client vivo (ver McpHost.ids_emitidos)
+        self.ids_ok = True  # resposta de `evitar_ids` quando o Client foi recriado
+        self.evitar_ids_chamadas: list[tuple[int, int]] = []
         self.espera: asyncio.Event | None = (
             None  # se definido, bloqueia tools/call ate ser liberado
         )
         self.dentro = asyncio.Event()
+
+    async def evitar_ids(
+        self, geracao_origem: int, ids_ate: int, trace_id: str | None = None
+    ) -> bool:
+        self.evitar_ids_chamadas.append((geracao_origem, ids_ate))
+        return self.ids_ok
 
     async def versao_da_politica(self, trace_id: str | None = None) -> str:
         self.leituras_de_politica.append(trace_id)
