@@ -4,3 +4,18 @@ __pycache__/
 node_modules/
 dist/
 *.log
+.env.*
+!.env.example
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.stderr.txt
+# fundacao de IA local
+.claude/settings.local.json
+.claude/skills/tlc-spec-driven/
+.specs/
+spikes/
+
+# DEC-23: fundacao de IA local fora da entrega por padrao (owner decide no D1)
+.claude/
+CLAUDE.md

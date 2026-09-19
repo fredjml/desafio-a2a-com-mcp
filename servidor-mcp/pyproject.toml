@@ -1,0 +1,22 @@
+[project]
+name = "servidor-mcp"
+version = "1.0.0"
+description = "Servidor MCP (Streamable HTTP, spec 2026-07-28) da Central de Salas"
+requires-python = ">=3.10"
+# Versoes travadas (exatas). Espelha requirements.txt; transitivas em constraints.txt.
+dependencies = ["mcp==2.2.0"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "httpx==0.28.1", "ruff==0.16.8", "mypy==2.3.1", "bandit==1.9.4", "pip-audit==2.10.1"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
