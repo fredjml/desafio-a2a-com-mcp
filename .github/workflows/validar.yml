@@ -1,0 +1,135 @@
+name: validar
+
+# Prova em Linux e nas duas pontas do intervalo de Python suportado (3.10 = piso do enunciado).
+# Nenhum segredo do GitHub e usado: o REQUEST_STATE_SECRET e gerado em memoria a cada execucao,
+# exportado so para o processo do servidor MCP e nunca impresso.
+
+on:
+  push:
+    branches: [feat/ponte, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validador:
+    name: validador (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Instalar servidor-mcp
+        working-directory: servidor-mcp
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt -c constraints.txt
+
+      - name: Instalar agente
+        working-directory: agente
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt -c constraints.txt
+
+      - name: Subir servidor MCP e agente (processos recem-iniciados)
+        run: |
+          set -euo pipefail
+          logs="$RUNNER_TEMP/logs"
+          mkdir -p "$logs"
+          # Segredo gerado em memoria; o prefixo de ambiente vale so para o processo do servidor.
+          (
+            cd servidor-mcp
+            REQUEST_STATE_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')" \
+              nohup .venv/bin/python -m app > "$logs/servidor-mcp.stdout.txt" 2> "$logs/servidor-mcp.stderr.txt" &
+            echo $! > "$logs/servidor-mcp.pid"
+          )
+          (
+            cd agente
+            nohup .venv/bin/python -m app > "$logs/agente.stdout.txt" 2> "$logs/agente.stderr.txt" &
+            echo $! > "$logs/agente.pid"
+          )
+          esperar() {
+            for _ in $(seq 1 60); do
+              if (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; then return 0; fi
+              sleep 1
+            done
+            echo "a porta $1 nao abriu em 60 s" >&2
+            return 1
+          }
+          esperar 7301
+          esperar 7300
+          curl -fsS -o /dev/null http://localhost:7300/.well-known/agent-card.json
+
+      - name: Rodar o validador
+        run: python3 validador/validar.py --agente http://localhost:7300 --mcp http://localhost:7301
+
+      - name: Encerrar processos
+        if: always()
+        run: |
+          for f in servidor-mcp agente; do
+            pid="$RUNNER_TEMP/logs/$f.pid"
+            if [ -f "$pid" ]; then kill "$(cat "$pid")" 2>/dev/null || true; fi
+          done
+          sleep 1
+
+      - name: Publicar logs (stderr dos dois processos)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-stderr-py${{ matrix.python-version }}
+          path: ${{ runner.temp }}/logs/*.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  testes:
+    name: testes e lint (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # O servidor entra primeiro: os testes do agente sobem o servidor real com servidor-mcp/.venv.
+      - name: servidor-mcp - instalar dependencias de desenvolvimento
+        working-directory: servidor-mcp
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.txt -c constraints.txt
+
+      - name: servidor-mcp - ruff
+        working-directory: servidor-mcp
+        run: .venv/bin/python -m ruff check .
+
+      - name: servidor-mcp - pytest
+        working-directory: servidor-mcp
+        run: .venv/bin/python -m pytest -q
+
+      - name: agente - instalar dependencias de desenvolvimento
+        working-directory: agente
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.txt -c constraints.txt
+
+      - name: agente - ruff
+        working-directory: agente
+        run: .venv/bin/python -m ruff check .
+
+      - name: agente - pytest
+        working-directory: agente
+        run: .venv/bin/python -m pytest -q
