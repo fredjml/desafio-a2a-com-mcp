@@ -43,6 +43,28 @@ class Disponibilidade(BaseModel):
     conflitos: list[ConflitoOut]
 
 
+# Forma unica do structuredContent da reserva: concluida (wire 02/04) ou recusada (wire 11).
+# Sem docstring de proposito: o pydantic a publicaria como `description` no outputSchema e o
+# tools/list deixaria de ser identico ao wire 01.
+class ReservaOut(BaseModel):
+    reserva: str | None = None
+    reservado: bool = True
+    sala: str | None = None
+    inicio: str | None = None
+    fim: str | None = None
+    responsavel: str | None = None
+    politica: str | None = None
+    motivo: str | None = None
+
+
+# TODO(E4a): substituir por MRTR (Elicit/Resolve): conflito => input_required com a elicitation das
+# alternativas + requestState selado; sem alternativa => MSG_SEM_ALTERNATIVAS. Ate la, a resposta ao
+# conflito e um erro de execucao PROVISORIO, claramente marcado (nao e uma das 5 mensagens do enunciado).
+MSG_PROVISORIA_CONFLITO_E4A = (
+    "PROVISORIO(E4a): conflito de horario; o fluxo input_required (MRTR) ainda nao foi implementado"
+)
+
+
 def resultado_ok(saida: BaseModel) -> CallToolResult:
     """structuredContent + o MESMO JSON serializado em bloco de texto (compatibilidade, check 03)."""
     estruturado = saida.model_dump(mode="json")
@@ -98,5 +120,32 @@ def registrar_tools(mcp: MCPServer, dados: Dados, agenda: Agenda) -> None:
                     )
                     for r in conflitos
                 ],
+            )
+        )
+
+    @mcp.tool(
+        name="reservar_sala",
+        description="Reserva uma sala. Se o intervalo estiver ocupado, pergunta qual alternativa usar.",
+    )
+    async def reservar_sala(
+        sala: str, inicio: str, fim: str, responsavel: str
+    ) -> Annotated[CallToolResult, ReservaOut]:
+        try:
+            intervalo = validar_pedido(sala, inicio, fim, ids_das_salas)
+        except ErroDeDominio as erro:
+            return resultado_erro(erro.mensagem)
+        if agenda.conflitos(sala, intervalo):
+            return resultado_erro(MSG_PROVISORIA_CONFLITO_E4A)  # TODO(E4a): MRTR
+        reserva = agenda.criar(sala, intervalo, responsavel)
+        return resultado_ok(
+            ReservaOut(
+                reserva=reserva.id,
+                reservado=True,
+                sala=reserva.sala,
+                inicio=formatar_instante(reserva.inicio),
+                fim=formatar_instante(reserva.fim),
+                responsavel=reserva.responsavel,
+                politica=dados.politica_versao,
+                motivo=None,
             )
         )
