@@ -256,14 +256,15 @@ def test_terminal_e_definitivo_no_agente_real(amb: Ambiente) -> None:
     assert len(amb.mcp.requests(method="tools/call")) == 1  # a mensagem recusada nao foi ao MCP
 
 
-# ------------------------------------------------------------------------------ provisorio E7a
-def test_conflito_provisorio_todo_e7a_nao_vaza_o_request_state_real(amb: Ambiente) -> None:
-    """TODO(E7a): hoje o conflito termina FAILED (provisorio). Ja vale: o requestState REAL que o
-    servidor emitiu (visto no proxy) nao aparece em nenhuma resposta A2A nem em stdout/stderr."""
+# ------------------------------------------------------------------------------ a pausa (E7a)
+def test_conflito_pausa_e_nao_vaza_o_request_state_real(amb: Ambiente) -> None:
+    """O requestState REAL que o servidor emitiu (visto no proxy) nao aparece em nenhuma resposta A2A
+    nem em stdout/stderr do agente."""
     r = amb.enviar(
         pedido("sala-garagem", "14:00", "15:00", "Marty"), cabecalhos={"traceparent": TRACEPARENT}
     )
-    assert estado(r) == "TASK_STATE_FAILED"
+    assert estado(r) == "TASK_STATE_INPUT_REQUIRED"
+    assert mensagem(r) == "alternativas: sala-fusca, sala-mirante"
     chamadas = [
         x["json"]
         for x in amb.proxy.respostas

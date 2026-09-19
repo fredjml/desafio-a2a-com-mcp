@@ -22,7 +22,14 @@ from a2a.server.id_generator import IDGenerator, IDGeneratorContext
 from a2a.server.tasks import TaskUpdater
 from a2a.types.a2a_pb2 import Message, Part, TaskState
 from a2a.utils.errors import InvalidParamsError
-from mcp_types import CallToolResult, ElicitResult, InputRequiredResult, TextContent
+from mcp_types import (
+    CallToolResult,
+    ElicitRequest,
+    ElicitRequestFormParams,
+    ElicitResult,
+    InputRequiredResult,
+    TextContent,
+)
 
 from .log import emitir
 from .mcp_host import McpHostError
@@ -38,14 +45,17 @@ ESTADOS_TERMINAIS = frozenset(
         TaskState.TASK_STATE_REJECTED,
     }
 )
-# TODO(E7a): substituir por INPUT_REQUIRED + "alternativas: a, b, c" (ponte real).
-MSG_PAUSA_PROVISORIA = (
-    "Conflito de reserva: a sala pedida esta ocupada e a escolha de alternativa "
-    "ainda nao esta implementada nesta versao do agente."
-)
 # TODO(E7b): substituir pela retomada (escolha=<v>) com o PausedState.
 MSG_CONTINUACAO_PROVISORIA = "A continuacao de Tasks pausadas ainda nao esta implementada."
 MSG_ERRO_INTERNO = "Erro interno do agente ao processar o pedido."
+MSG_PERGUNTA_INVALIDA = "O servidor MCP pediu uma escolha em formato que o agente nao entende."
+MSG_RECUSADA = "Reserva recusada: nenhuma sala foi reservada."
+MSG_SEM_ESTADO = "Esta Task nao tem mais o estado necessario para continuar. Envie um novo pedido."
+MSG_CLIENTE_RECRIADO = (
+    "A conexao com o servidor MCP foi refeita desde a pausa e a escolha nao foi enviada, para "
+    "nao repetir um id de requisicao. Envie um novo pedido."
+)
+ESCOLHA_RECUSAR = "recusar"
 
 
 class GeradorComPrefixo(IDGenerator):
@@ -64,7 +74,9 @@ class PausedState:
     """Estado de uma Task pausada (03 §5). Vive SO em memoria, num dict FORA do TaskStore do SDK.
 
     Nunca e serializado para o cliente A2A. `request_state` e opaco (guardar e ecoar; nunca abrir).
-    TODO(E7a): preenchido quando o MCP devolver `InputRequiredResult`.
+    Preenchido quando o MCP devolve `InputRequiredResult`; atualizado a cada nova rodada (R-BR-07).
+    `campo` = nome da propriedade do formulario recebido (a resposta e `{campo: escolha}`);
+    `geracao_cliente` = geracao do Client MCP que fez a chamada (ver `McpHost.geracao`).
     """
 
     task_id: str
@@ -75,6 +87,9 @@ class PausedState:
     enum: list[str]
     request_state: str = field(repr=False)
     trace_id: str
+    campo: str = "sala"
+    geracao_cliente: int = 0
+    rodada: int = 1
 
 
 class PausedRegistry:
@@ -98,6 +113,11 @@ class PausedRegistry:
 
 class ServicoMcp(Protocol):
     """O que o executor precisa do host MCP (facilita fakes nos testes)."""
+
+    @property
+    def geracao(self) -> int:
+        """Geracao do Client MCP que atenderia uma chamada agora (muda quando o Client e recriado)."""
+        ...
 
     async def versao_da_politica(self, trace_id: str | None = None) -> str: ...
 
@@ -150,6 +170,58 @@ def artifact_da_reserva(dados: dict[str, Any], politica: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class Pergunta:
+    """A elicitation RECEBIDA do servidor, reduzida ao que a ponte precisa (nada e recalculado)."""
+
+    chave: str
+    campo: str
+    opcoes: list[str]
+    request_state: str = field(repr=False)
+
+
+def texto_alternativas(opcoes: list[str]) -> str:
+    """Texto EXATO da pausa (R-BR-01): `alternativas: a, b, c`, sem prefixo, saudacao nem ponto."""
+    return "alternativas: " + ", ".join(opcoes)
+
+
+def _opcoes_do_campo(propriedade: Any) -> list[str] | None:
+    if not isinstance(propriedade, dict):
+        return None
+    bruto = propriedade.get("enum")
+    if bruto is None and "const" in propriedade:
+        bruto = [propriedade["const"]]  # 1 alternativa: o SDK do servidor emite `const`
+    if not isinstance(bruto, list) or not bruto:
+        return None
+    if not all(isinstance(v, str) and v for v in bruto):
+        return None
+    return list(bruto)
+
+
+def extrair_pergunta(resultado: InputRequiredResult) -> Pergunta | None:
+    """Le chave, opcoes (`enum` ou `const` do requestedSchema RECEBIDO) e requestState (opaco).
+
+    None se o formato nao for o esperado (1 pedido de formulario com opcoes, e um requestState).
+    """
+    pedidos = resultado.input_requests or {}
+    estado = resultado.request_state
+    if len(pedidos) != 1 or not isinstance(estado, str) or not estado:
+        return None
+    chave, pedido = next(iter(pedidos.items()))
+    if not isinstance(pedido, ElicitRequest) or not isinstance(
+        pedido.params, ElicitRequestFormParams
+    ):
+        return None
+    propriedades = pedido.params.requested_schema.get("properties")
+    if not isinstance(propriedades, dict) or not propriedades:
+        return None
+    campo = "sala" if "sala" in propriedades else next(iter(propriedades))
+    opcoes = _opcoes_do_campo(propriedades[campo])
+    if opcoes is None:
+        return None
+    return Pergunta(chave=chave, campo=str(campo), opcoes=opcoes, request_state=estado)
+
+
 def mensagem_de_falha_mcp(exc: McpHostError) -> str:
     return f"Nao foi possivel concluir a reserva: {exc.mensagem}"
 
@@ -180,6 +252,7 @@ class _Saida:
     def __init__(self, upd: TaskUpdater) -> None:
         self.upd = upd
         self.encerrada = False
+        self.pausada = False
 
     def _mensagem(self, texto: str) -> Message:
         return self.upd.new_agent_message([Part(text=texto)])
@@ -202,6 +275,11 @@ class _Saida:
 
     async def cancelou(self, texto: str) -> None:
         await self._publicar(TaskState.TASK_STATE_CANCELED, texto)
+
+    async def pausou(self, texto: str) -> None:
+        """INPUT_REQUIRED com a mensagem (history fica [user, agent], como no wire 08)."""
+        await self._publicar(TaskState.TASK_STATE_INPUT_REQUIRED, texto)
+        self.pausada = True
 
 
 class ExecutorReservas(AgentExecutor):
@@ -242,6 +320,9 @@ class ExecutorReservas(AgentExecutor):
             emitir("erro", task=task_id, tipo=type(exc).__name__)
             if not saida.encerrada:
                 await saida.falhou(MSG_ERRO_INTERNO)
+        finally:
+            if not saida.pausada:  # terminal (ou falha): o estado da ponte nao sobrevive
+                self.pausadas.limpar(task_id)
 
     async def _nova(self, context: RequestContext, saida: _Saida) -> None:
         texto = context.get_user_input()
@@ -263,8 +344,7 @@ class ExecutorReservas(AgentExecutor):
             return
 
         if isinstance(resultado, InputRequiredResult):
-            # TODO(E7a): pausa (INPUT_REQUIRED + "alternativas: ..."), PausedState em self.pausadas.
-            await saida.falhou(MSG_PAUSA_PROVISORIA)
+            await self._pausar(context, saida, pedido.argumentos(), trace_id, resultado)
             return
         if resultado.is_error:
             await saida.falhou(texto_da_tool(resultado))  # mensagem EXATA da tool
@@ -277,6 +357,39 @@ class ExecutorReservas(AgentExecutor):
             f"Reserva {reserva['reserva']} confirmada na {reserva['sala']}.",
             artifact_da_reserva(reserva, politica),
         )
+
+    async def _pausar(
+        self,
+        context: RequestContext,
+        saida: _Saida,
+        argumentos: dict[str, str],
+        trace_id: str,
+        resultado: InputRequiredResult,
+    ) -> None:
+        """MCP respondeu `input_required`: guarda o PausedState e poe a Task em INPUT_REQUIRED."""
+        pergunta = extrair_pergunta(resultado)
+        if pergunta is None:
+            await saida.falhou(MSG_PERGUNTA_INVALIDA)
+            return
+        task_id = str(context.task_id)
+        self.pausadas.guardar(  # ANTES de publicar: a continuacao pode chegar logo apos a resposta
+            PausedState(
+                task_id=task_id,
+                context_id=str(resolver_context_id(context)),
+                tool_name=FERRAMENTA_RESERVA,
+                original_arguments=dict(argumentos),
+                input_request_key=pergunta.chave,
+                enum=list(pergunta.opcoes),
+                request_state=pergunta.request_state,
+                trace_id=trace_id,
+                campo=pergunta.campo,
+                geracao_cliente=self._mcp.geracao,
+            )
+        )
+        emitir(
+            "ponte", acao="pausada", task=task_id, trace_id=trace_id, opcoes=len(pergunta.opcoes)
+        )
+        await saida.pausou(texto_alternativas(pergunta.opcoes))
 
     async def _continuacao(self, context: RequestContext, saida: _Saida) -> None:
         # TODO(E7b): escolha=<v> / escolha=recusar sobre o PausedState desta Task.

@@ -20,7 +20,6 @@ from app.tasks import (
     ESTADOS_TERMINAIS,
     MSG_CONTINUACAO_PROVISORIA,
     MSG_ERRO_INTERNO,
-    MSG_PAUSA_PROVISORIA,
     PausedRegistry,
     PausedState,
     artifact_da_reserva,
@@ -236,7 +235,7 @@ async def test_falha_do_mcp_termina_a_task_com_erro_claro_nunca_em_working(
         g = await rpc(c, "GetTask", {"id": tarefa(r)["id"]})
     assert estado(r) == "TASK_STATE_FAILED"
     assert mensagem_de(r) == f"Nao foi possivel concluir a reserva: {erro.mensagem}"
-    assert g["result"]["status"]["state"] == "TASK_STATE_FAILED"
+    assert g["result"]["task"]["status"]["state"] == "TASK_STATE_FAILED"
 
 
 async def test_falha_ao_ler_a_politica_termina_a_task_sem_chamar_a_tool() -> None:
@@ -258,7 +257,10 @@ async def test_excecao_inesperada_no_executor_falha_a_task_nunca_deixa_em_workin
         r = await enviar(c, pedido("sala-porao", "09:00", "10:00"))
         g = await rpc(c, "GetTask", {"id": tarefa(r)["id"]})
     assert estado(r) == "TASK_STATE_FAILED" and mensagem_de(r) == MSG_ERRO_INTERNO
-    assert "segredo" not in json.dumps(r) and g["result"]["status"]["state"] == "TASK_STATE_FAILED"
+    assert (
+        "segredo" not in json.dumps(r)
+        and g["result"]["task"]["status"]["state"] == "TASK_STATE_FAILED"
+    )
 
 
 # ------------------------------------------------------------------------------ FSM
@@ -290,7 +292,7 @@ async def test_transicoes_submitted_working_terminal_e_getask_reflete_o_corrente
             (task_id,) = {t for t, _ in loja.vistos}
             durante = await asyncio.wait_for(rpc(c, "GetTask", {"id": task_id}), 10)
             assert (
-                durante["result"]["status"]["state"] == "TASK_STATE_WORKING"
+                durante["result"]["task"]["status"]["state"] == "TASK_STATE_WORKING"
             )  # GetTask = corrente
             assert not envio.done()  # SendMessage e bloqueante
             host.espera.set()
@@ -299,7 +301,7 @@ async def test_transicoes_submitted_working_terminal_e_getask_reflete_o_corrente
     finally:
         host.espera.set()
     assert estado(r) == "TASK_STATE_COMPLETED"
-    assert depois["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert depois["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
     estados = [e for _, e in loja.vistos]
     assert estados[0] == TaskState.TASK_STATE_SUBMITTED
     assert estados[1] == TaskState.TASK_STATE_WORKING
@@ -336,7 +338,9 @@ async def test_sendmessage_para_task_terminal_e_erro_e_o_estado_nao_regride_t16(
         r = await enviar(c, "escolha=sala-mirante", task_id="task-final")
         g = await rpc(c, "GetTask", {"id": "task-final"})
     assert "result" not in r and r["error"]["code"] == -32602
-    assert g["result"]["status"]["state"] == TaskState.Name(terminal)  # segue no mesmo terminal
+    assert g["result"]["task"]["status"]["state"] == TaskState.Name(
+        terminal
+    )  # segue no mesmo terminal
     assert host.chamadas == [] and host.leituras_de_politica == []
 
 
@@ -348,7 +352,7 @@ async def test_sendmessage_para_task_de_verdade_ja_concluida_e_erro() -> None:
         r3 = await enviar(c, pedido("sala-porao", "09:00", "10:00"), task_id=tarefa(r1)["id"])
         g = await rpc(c, "GetTask", {"id": tarefa(r1)["id"]})
     assert "error" in r2 and "error" in r3
-    assert g["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert g["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
     assert len(host.chamadas) == 1  # so a 1a mensagem chegou ao MCP
 
 
@@ -428,18 +432,18 @@ async def test_sem_traceparent_cada_task_recebe_seu_proprio_trace() -> None:
 
 
 # ------------------------------------------------------------------------------ ponte provisoria (E7a)
-async def test_pausa_provisoria_todo_e7a_conflito_falha_a_task_e_nao_vaza_o_request_state() -> None:
-    """TODO(E7a): trocar por INPUT_REQUIRED + 'alternativas: ...'. Ate la, FAILED provisorio."""
+async def test_conflito_pausa_a_task_e_nao_vaza_o_request_state() -> None:
     host = HostFalso([conflito()])
     app = app_com(host)
     async with cliente_asgi(app) as c:
         r = await enviar(c, pedido("sala-garagem", "14:00", "15:00"))
         g = await rpc(c, "GetTask", {"id": tarefa(r)["id"]})
         lista = await rpc(c, "ListTasks", {})
-    assert estado(r) == "TASK_STATE_FAILED" and mensagem_de(r) == MSG_PAUSA_PROVISORIA
+    assert estado(r) == "TASK_STATE_INPUT_REQUIRED"
+    assert mensagem_de(r) == "alternativas: sala-fusca, sala-mirante"
     for corpo in (r, g, lista):
         assert ESTADO_OPACO[:20] not in json.dumps(corpo)
-    assert len(app.pausadas) == 0 and host.invocacoes_da_fachada == 0
+    assert len(app.pausadas) == 1 and host.invocacoes_da_fachada == 0
 
 
 def test_paused_registry_fica_fora_do_task_store_e_nao_expoe_o_estado_no_repr() -> None:

@@ -105,7 +105,7 @@ async def test_request_sem_a2a_version_e_tratado_como_1_0_t40() -> None:
     async with cliente_asgi(app) as c:
         resposta = await rpc(c, "GetTask", {"id": "task-1"})
     assert "error" not in resposta, resposta
-    assert resposta["result"]["id"] == "task-1"
+    assert resposta["result"]["task"]["id"] == "task-1"
 
 
 async def test_a2a_version_1_0_explicita_tambem_funciona() -> None:
@@ -133,10 +133,12 @@ async def test_gettask_reflete_o_estado_corrente() -> None:
         antes = await rpc(c, "GetTask", {"id": "task-7"})
         await guardar_task(app, "task-7", TaskState.TASK_STATE_COMPLETED, "Reserva res-1 pronta.")
         depois = await rpc(c, "GetTask", {"id": "task-7"})
-    assert antes["result"]["status"]["state"] == "TASK_STATE_WORKING"
-    assert depois["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
-    assert depois["result"]["contextId"] == "ctx-teste"
-    assert depois["result"]["status"]["message"]["parts"] == [{"text": "Reserva res-1 pronta."}]
+    assert antes["result"]["task"]["status"]["state"] == "TASK_STATE_WORKING"
+    assert depois["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert depois["result"]["task"]["contextId"] == "ctx-teste"
+    assert depois["result"]["task"]["status"]["message"]["parts"] == [
+        {"text": "Reserva res-1 pronta."}
+    ]
 
 
 async def test_gettask_inexistente_e_erro_bem_formado() -> None:

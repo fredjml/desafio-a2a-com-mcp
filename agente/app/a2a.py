@@ -16,11 +16,8 @@ from typing import Any
 from a2a.server.agent_execution import AgentExecutor, SimpleRequestContextBuilder
 from a2a.server.context import ServerCallContext
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.routes import (
-    DefaultServerCallContextBuilder,
-    create_agent_card_routes,
-    create_jsonrpc_routes,
-)
+from a2a.server.routes import DefaultServerCallContextBuilder, create_agent_card_routes
+from a2a.server.routes.jsonrpc_dispatcher import JsonRpcDispatcher
 from a2a.server.tasks import InMemoryTaskStore, TaskStore
 from a2a.types.a2a_pb2 import (
     AgentCapabilities,
@@ -31,6 +28,7 @@ from a2a.types.a2a_pb2 import (
 )
 from starlette.applications import Starlette
 from starlette.requests import Request
+from starlette.routing import Route
 from starlette.types import ASGIApp
 
 from .config import Config
@@ -95,6 +93,21 @@ class ContextoComVersaoPadrao(DefaultServerCallContextBuilder):
         return contexto
 
 
+class DespachanteComGetTaskNoWire(JsonRpcDispatcher):
+    """`GetTask` devolve `result.task`, identico ao wire 09 (o SDK 1.1.4 devolve a Task direto em `result`).
+
+    Decisao E7: fidelidade ao wire (o validador aceita as duas formas). So o formato do `GetTask` muda;
+    `SendMessage` ja devolve `result.task` no SDK. Sobrescreve o metodo interno `_handle_get_task`
+    (versao do SDK travada em 1.1.4; um teste confere o formato).
+    """
+
+    async def _handle_get_task(
+        self, request_obj: Any, context: ServerCallContext
+    ) -> dict[str, Any]:
+        tarefa: dict[str, Any] = await super()._handle_get_task(request_obj, context)
+        return {"task": tarefa}
+
+
 class App:
     """Agrupa o que o processo e os testes precisam (host MCP, executor, ASGI)."""
 
@@ -133,9 +146,12 @@ class App:
             await self.host.aclose()
 
     def asgi(self) -> ASGIApp:
-        rotas: list[Any] = create_agent_card_routes(self.card) + create_jsonrpc_routes(
-            self.handler, CAMINHO_RPC, context_builder=ContextoComVersaoPadrao()
+        despachante = DespachanteComGetTaskNoWire(
+            self.handler, context_builder=ContextoComVersaoPadrao()
         )
+        rotas: list[Any] = create_agent_card_routes(self.card) + [
+            Route(CAMINHO_RPC, endpoint=despachante.handle_requests, methods=["POST"])
+        ]
         return RegistroDeRequests(Starlette(routes=rotas, lifespan=self._ciclo_de_vida))
 
 

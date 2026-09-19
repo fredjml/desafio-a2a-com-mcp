@@ -101,6 +101,16 @@ class McpHost:
         self.invocacoes_da_fachada = 0
         self.clientes_criados = 0
 
+    @property
+    def geracao(self) -> int:
+        """Geracao do Client que atenderia uma chamada AGORA: a atual, ou a proxima se nao ha Client vivo.
+
+        Um Client novo recomeca os ids JSON-RPC em 1; a ponte compara a geracao da pausa com a do
+        retry e nao envia o retry por outro Client (o id poderia igualar o da chamada inicial).
+        """
+        vivo = self._ciclo is not None and self._ciclo.client is not None
+        return self.clientes_criados if vivo else self.clientes_criados + 1
+
     # ------------------------------------------------------------------ fachada
     async def _fachada_elicitation(
         self, context: object, params: ElicitRequestParams

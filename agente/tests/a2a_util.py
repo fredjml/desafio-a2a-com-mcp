@@ -76,6 +76,7 @@ class HostFalso:
         self.chamadas: list[dict[str, Any]] = []
         self.leituras_de_politica: list[str | None] = []
         self.invocacoes_da_fachada = 0
+        self.geracao = 1  # geracao do Client MCP (ver McpHost.geracao); testes podem alterar
         self.espera: asyncio.Event | None = (
             None  # se definido, bloqueia tools/call ate ser liberado
         )
