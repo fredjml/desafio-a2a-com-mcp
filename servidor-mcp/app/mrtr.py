@@ -27,7 +27,7 @@ from typing import Annotated, Any, Literal
 from mcp.server.elicitation import AcceptedElicitation
 from mcp.server.mcpserver import Context, Elicit, ElicitationResult, MCPServer, Resolve
 from mcp.shared.exceptions import MCPError
-from mcp_types import INVALID_PARAMS, CallToolResult
+from mcp_types import INVALID_PARAMS, MISSING_REQUIRED_CLIENT_CAPABILITY, CallToolResult
 from pydantic import BaseModel, Field, create_model
 
 from .alternatives import alternativas
@@ -39,6 +39,8 @@ from .tools import ReservaOut, resultado_erro, resultado_ok
 
 MENSAGEM_ELICITATION = "A sala pedida esta ocupada nesse intervalo. Escolha uma alternativa."
 MOTIVO_RECUSADO = "recusado"
+# Chave de inputRequests atribuida pelo SDK: `modulo:qualname` do resolvedor (qualname fixado abaixo).
+CHAVE_DA_ELICITATION = "app.mrtr:escolha_de_sala"
 MSG_ESTADO_INVALIDO = (
     "Invalid or expired requestState"  # a mesma que o SDK usa para selo/ttl/vinculo
 )
@@ -84,6 +86,13 @@ def estado_ausente_no_retry(ctx: Context[Any, Any]) -> bool:
     return bool(ctx.input_responses) and not ctx.request_state
 
 
+def declarou_elicitation_form(ctx: Context[Any, Any]) -> bool:
+    """So `elicitation.form` serve. `{}` e `{"elicitation":{}}` NAO contam (o SDK aceitaria o 2o)."""
+    capacidades = ctx.client_capabilities
+    elicitation = capacidades.elicitation if capacidades is not None else None
+    return elicitation is not None and elicitation.form is not None
+
+
 def cliente_recusou(ctx: Context[Any, Any]) -> bool:
     """Alguma resposta do retry e decline/cancel (o requestState ja foi verificado pelo SDK)."""
     respostas = ctx.input_responses or {}
@@ -122,11 +131,22 @@ def criar_resolvedor(
             return SemConflito()
         oferta = alternativas(dados.salas, agenda.reservas, sala, intervalo)
         if not oferta:
-            return ErroDeExecucao(mensagem=MSG_SEM_ALTERNATIVAS)
+            return ErroDeExecucao(mensagem=MSG_SEM_ALTERNATIVAS)  # sem elicitation: nada a exigir
+        if not declarou_elicitation_form(ctx):
+            raise MCPError(  # -32021 (HTTP 400 pelo transporte); nenhuma reserva foi criada
+                code=MISSING_REQUIRED_CLIENT_CAPABILITY,
+                message=(
+                    "Client did not declare the form elicitation capability required by "
+                    f"resolver '{CHAVE_DA_ELICITATION}'"
+                ),
+                data={"requiredCapabilities": {"elicitation": {"form": {}}}},
+            )
         return Elicit(MENSAGEM_ELICITATION, modelo_de_escolha([s.id for s in oferta]))
 
     # A chave da elicitation no fio deriva de `modulo:qualname`; fixar o qualname evita `<locals>`.
     escolha_de_sala.__qualname__ = "escolha_de_sala"
+    if f"{escolha_de_sala.__module__}:{escolha_de_sala.__qualname__}" != CHAVE_DA_ELICITATION:
+        raise RuntimeError("chave da elicitation divergente do esperado")  # pragma: no cover
     return escolha_de_sala
 
 
