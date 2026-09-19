@@ -21,7 +21,6 @@ from .tools import registrar_tools
 # O nome entra no `aud` do requestState selado: FIXO, senao um restart/rename invalida os estados.
 NOME_SERVIDOR = "central-de-salas"
 VERSAO_SERVIDOR = "1.0.0"
-TTL_REQUEST_STATE_S = 600.0  # 10 min, dentro da faixa 5-30 min do enunciado
 COMANDO = "python -m app"
 
 
@@ -35,7 +34,7 @@ def criar_servidor(config: Config, dados: Dados) -> MCPServer:
         NOME_SERVIDOR,
         version=VERSAO_SERVIDOR,
         request_state_security=RequestStateSecurity(
-            keys=[config.request_state_secret], ttl=TTL_REQUEST_STATE_S
+            keys=[config.request_state_secret], ttl=config.request_state_ttl_s
         ),
         log_level="WARNING",  # o SDK nao loga request; evita ruido no stderr
     )
@@ -99,7 +98,7 @@ def servir(config: Config) -> None:
         servidor=NOME_SERVIDOR,
         versao=VERSAO_SERVIDOR,
         request_state="selado com keys explicitas de REQUEST_STATE_SECRET",
-        request_state_ttl_s=TTL_REQUEST_STATE_S,
+        request_state_ttl_s=config.request_state_ttl_s,
         python=sys.version.split()[0],
     )
     # access_log=False: o access log do uvicorn vai a stdout e nao traz metodo/id/traceparent.

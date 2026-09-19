@@ -26,7 +26,7 @@ K_VERSAO = "io.modelcontextprotocol/protocolVersion"
 K_CAPS = "io.modelcontextprotocol/clientCapabilities"
 K_INFO = "io.modelcontextprotocol/clientInfo"
 
-_VARS_DO_SERVIDOR = ("REQUEST_STATE_SECRET", "MCP_PORT", "DADOS_DIR")
+_VARS_DO_SERVIDOR = ("REQUEST_STATE_SECRET", "REQUEST_STATE_TTL_S", "MCP_PORT", "DADOS_DIR")
 
 
 def ipv6_disponivel() -> bool:

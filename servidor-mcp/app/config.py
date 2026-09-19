@@ -16,6 +16,11 @@ PORTA_PADRAO = 7301
 # Placeholder do .env.example: colar o exemplo sem gerar a chave nao pode subir o servidor.
 PLACEHOLDER_SEGREDO = "<cole-aqui-64-hex-gerados-localmente>"
 MIN_BYTES_SEGREDO = 32
+# TTL do requestState: 10 min (faixa 5-30 min do enunciado). REQUEST_STATE_TTL_S existe para os testes de
+# expiracao (TTL curto); o limite superior impede alongar a janela alem do que o enunciado admite.
+TTL_PADRAO_S = 600.0
+TTL_MIN_S = 1.0
+TTL_MAX_S = 1800.0
 ARQUIVOS_DADOS = ("salas.json", "reservas.json", "politica-de-uso.md")
 
 _HEX = re.compile(r"[0-9a-fA-F]+")
@@ -34,6 +39,7 @@ class Config:
     dados_dir: Path
     # repr=False: um `print(config)` acidental nao pode vazar a chave.
     request_state_secret: str = field(repr=False)
+    request_state_ttl_s: float = TTL_PADRAO_S
 
 
 def validar_segredo(valor: str | None) -> str:
@@ -75,6 +81,18 @@ def _porta(valor: str | None) -> int:
     return porta
 
 
+def _ttl(valor: str | None) -> float:
+    if valor is None or not valor.strip():
+        return TTL_PADRAO_S
+    try:
+        ttl = float(valor.strip())
+    except ValueError:
+        raise ConfigError("REQUEST_STATE_TTL_S invalido: use um numero de segundos.") from None
+    if not TTL_MIN_S <= ttl <= TTL_MAX_S:  # tambem rejeita nan/inf
+        raise ConfigError(f"REQUEST_STATE_TTL_S invalido: use de {TTL_MIN_S:g} a {TTL_MAX_S:g} s.")
+    return ttl
+
+
 def _dados_dir(valor: str | None) -> Path:
     pasta = Path(valor.strip()).resolve() if valor and valor.strip() else DADOS_PADRAO
     faltando = [nome for nome in ARQUIVOS_DADOS if not (pasta / nome).is_file()]
@@ -90,4 +108,5 @@ def carregar_config(env: Mapping[str, str] | None = None) -> Config:
         porta=_porta(ambiente.get("MCP_PORT")),
         dados_dir=_dados_dir(ambiente.get("DADOS_DIR")),
         request_state_secret=validar_segredo(ambiente.get("REQUEST_STATE_SECRET")),
+        request_state_ttl_s=_ttl(ambiente.get("REQUEST_STATE_TTL_S")),
     )

@@ -84,3 +84,28 @@ def test_porta_via_ambiente() -> None:
 def test_dados_dir_invalido(tmp_path: Path) -> None:
     with pytest.raises(ConfigError):
         carregar_config({"REQUEST_STATE_SECRET": secrets.token_hex(32), "DADOS_DIR": str(tmp_path)})
+
+
+def test_ttl_padrao_do_request_state_e_600_s() -> None:
+    assert (
+        carregar_config({"REQUEST_STATE_SECRET": secrets.token_hex(32)}).request_state_ttl_s
+        == 600.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("valor", "esperado"), [("2", 2.0), (" 30 ", 30.0), ("1.5", 1.5), ("1800", 1800.0)]
+)
+def test_ttl_via_ambiente_para_testes_de_expiracao(valor: str, esperado: float) -> None:
+    cfg = carregar_config(
+        {"REQUEST_STATE_SECRET": secrets.token_hex(32), "REQUEST_STATE_TTL_S": valor}
+    )
+    assert cfg.request_state_ttl_s == esperado
+
+
+@pytest.mark.parametrize("valor", ["0", "0.5", "-1", "1801", "abc", "nan", "inf", "1e9"])
+def test_ttl_invalido_falha_no_boot(valor: str) -> None:
+    with pytest.raises(ConfigError, match="REQUEST_STATE_TTL_S"):
+        carregar_config(
+            {"REQUEST_STATE_SECRET": secrets.token_hex(32), "REQUEST_STATE_TTL_S": valor}
+        )

@@ -16,7 +16,8 @@ Como funciona (mcp 2.2.0, protocolo >= 2026-07-28):
     REQUEST_STATE_SECRET) e vinculado a metodo, nome da tool e digest dos argumentos. O servidor NAO
     guarda nada entre `input_required` e o retry; nao ha nonce (o estado e reutilizavel).
   * o resolvedor roda de novo a cada rodada: se as alternativas mudaram, a pergunta muda e o SDK
-    descarta a resposta e pergunta de novo (revalidacao, DEC-20).
+    descarta a resposta e pergunta de novo (revalidacao, DEC-20). Excecoes decididas aqui: decline/cancel
+    sempre concluem sem reservar; retry sem requestState (ausente/null) e -32602.
   * nao se mistura com `InputRequiredResult` manual: o SDK recusa (`InvalidSignature`).
 """
 
@@ -25,7 +26,8 @@ from typing import Annotated, Any, Literal
 
 from mcp.server.elicitation import AcceptedElicitation
 from mcp.server.mcpserver import Context, Elicit, ElicitationResult, MCPServer, Resolve
-from mcp_types import CallToolResult
+from mcp.shared.exceptions import MCPError
+from mcp_types import INVALID_PARAMS, CallToolResult
 from pydantic import BaseModel, Field, create_model
 
 from .alternatives import alternativas
@@ -37,10 +39,17 @@ from .tools import ReservaOut, resultado_erro, resultado_ok
 
 MENSAGEM_ELICITATION = "A sala pedida esta ocupada nesse intervalo. Escolha uma alternativa."
 MOTIVO_RECUSADO = "recusado"
+MSG_ESTADO_INVALIDO = (
+    "Invalid or expired requestState"  # a mesma que o SDK usa para selo/ttl/vinculo
+)
 
 
 class SemConflito(BaseModel):
     """Desfecho do resolvedor: o intervalo esta livre, reserva-se a sala pedida."""
+
+
+class Recusado(BaseModel):
+    """Desfecho do resolvedor: o cliente recusou (decline/cancel): conclui sem reservar."""
 
 
 class ErroDeExecucao(BaseModel):
@@ -55,7 +64,7 @@ class EscolhaFeita(BaseModel):
     sala: str
 
 
-Desfecho = SemConflito | ErroDeExecucao | EscolhaFeita
+Desfecho = SemConflito | Recusado | ErroDeExecucao | EscolhaFeita
 
 
 def modelo_de_escolha(salas: Sequence[str]) -> type[EscolhaFeita]:
@@ -70,6 +79,17 @@ def modelo_de_escolha(salas: Sequence[str]) -> type[EscolhaFeita]:
     )
 
 
+def estado_ausente_no_retry(ctx: Context[Any, Any]) -> bool:
+    """Retry (traz `inputResponses`) sem `requestState` (ausente ou null): nao ha o que retomar."""
+    return bool(ctx.input_responses) and not ctx.request_state
+
+
+def cliente_recusou(ctx: Context[Any, Any]) -> bool:
+    """Alguma resposta do retry e decline/cancel (o requestState ja foi verificado pelo SDK)."""
+    respostas = ctx.input_responses or {}
+    return any(getattr(r, "action", None) in ("decline", "cancel") for r in respostas.values())
+
+
 def criar_resolvedor(
     dados: Dados, agenda: Agenda
 ) -> Callable[..., Awaitable[Elicit[Any] | Desfecho]]:
@@ -80,11 +100,25 @@ def criar_resolvedor(
     async def escolha_de_sala(
         sala: str, inicio: str, fim: str, ctx: Context[Any, Any]
     ) -> Elicit[Any] | Desfecho:
+        if estado_ausente_no_retry(ctx):
+            # O SDK trata `requestState` ausente/null como "sem progresso" e re-perguntaria; um retry
+            # sem estado e entrada invalida (a spec pede o estado ecoado): mesmo erro do selo invalido.
+            raise MCPError(
+                code=INVALID_PARAMS,
+                message=MSG_ESTADO_INVALIDO,
+                data={"reason": "invalid_request_state"},
+            )
         try:
             intervalo = validar_pedido(sala, inicio, fim, ids_das_salas)
         except ErroDeDominio as erro:
             return ErroDeExecucao(mensagem=erro.mensagem)
+        if cliente_recusou(ctx):
+            # decline/cancel vale sempre (o SDK ja verificou o requestState): a pergunta pode ter mudado
+            # desde a recusa (outra Task pegou uma alternativa) e re-perguntar a quem recusou nao serve.
+            return Recusado()
         if not agenda.conflitos(sala, intervalo):
+            # Revalidacao (DEC-20): o conflito que gerou a pergunta sumiu (ex.: restart). Um accept
+            # reserva a sala PEDIDA, nao a alternativa escolhida sobre uma pergunta obsoleta.
             return SemConflito()
         oferta = alternativas(dados.salas, agenda.reservas, sala, intervalo)
         if not oferta:
@@ -121,6 +155,8 @@ def registrar_reserva(mcp: MCPServer, dados: Dados, agenda: Agenda) -> None:
         desfecho = escolha.data
         if isinstance(desfecho, ErroDeExecucao):
             return resultado_erro(desfecho.mensagem)
+        if isinstance(desfecho, Recusado):
+            return recusada()
         if isinstance(desfecho, SemConflito):
             alvo = sala
         elif isinstance(desfecho, EscolhaFeita):
