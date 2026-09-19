@@ -30,8 +30,6 @@ from .test_e2e_agente import (  # noqa: F401  (a fixture `amb` e usada por nome)
 
 TRACE_ID = secrets.token_hex(16)  # novo por execucao
 TRACEPARENT = f"00-{TRACE_ID}-{secrets.token_hex(8)}-01"
-OUTRO_TRACE = secrets.token_hex(16)
-OUTRO_TRACEPARENT = f"00-{OUTRO_TRACE}-{secrets.token_hex(8)}-01"
 LISTA_GARAGEM = "alternativas: sala-fusca, sala-mirante"
 ERRO_SALA = "Sala inexistente: sala-inexistente"
 

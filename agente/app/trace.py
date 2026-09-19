@@ -42,3 +42,13 @@ def traceparent_para(trace_id: str) -> str:
         span = secrets.token_hex(8)
         if span != "0" * 16:
             return f"00-{trace_id}-{span}-01"
+
+
+def trace_da_task(guardado: str, header: object) -> tuple[str, bool]:
+    """DEC-19: o trace-id da Task e o fixado no 1o pedido; um `traceparent` novo na continuacao NAO o troca.
+
+    Devolve `(trace_id_da_task, header_ignorado)`; `header_ignorado` e True quando o header era um
+    `traceparent` valido com OUTRO trace-id (so para o log). Header ausente/invalido: usa o guardado.
+    """
+    novo = trace_id_de(header)
+    return guardado, novo is not None and novo != guardado

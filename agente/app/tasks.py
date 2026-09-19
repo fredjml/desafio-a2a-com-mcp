@@ -34,7 +34,7 @@ from mcp_types import (
 from .log import emitir
 from .mcp_host import McpHostError
 from .parser import PedidoInvalido, parse_escolha, parse_pedido
-from .trace import novo_trace_id, trace_id_de
+from .trace import novo_trace_id, trace_da_task, trace_id_de
 
 FERRAMENTA_RESERVA = "reservar_sala"
 ESTADOS_TERMINAIS = frozenset(
@@ -397,6 +397,10 @@ class ExecutorReservas(AgentExecutor):
             await saida.falhou(MSG_SEM_ESTADO)
             return
         lista = texto_alternativas(estado.enum)
+        # R-HOST-03/DEC-19: o trace-id da Task foi fixado no 1o pedido; um traceparent novo NAO o troca.
+        trace_id, ignorado = trace_da_task(estado.trace_id, traceparent_do_request(context))
+        if ignorado:
+            emitir("trace", acao="cabecalho_ignorado", task=task_id, trace_id=trace_id)
         try:
             valor = parse_escolha(context.get_user_input())
         except PedidoInvalido as exc:  # nao e `escolha=...`: resposta clara, sem chamar o MCP
@@ -415,17 +419,17 @@ class ExecutorReservas(AgentExecutor):
         aceita = resposta.action == "accept"
         try:
             # A politica vem do resource, lida NESTA Task, antes do retry (que pode criar a reserva).
-            politica = await self._mcp.versao_da_politica(estado.trace_id) if aceita else ""
+            politica = await self._mcp.versao_da_politica(trace_id) if aceita else ""
             if self._mcp.geracao != estado.geracao_cliente:
                 # Um Client novo recomeca os ids em 1: o retry poderia repetir o id da chamada inicial.
                 emitir("ponte", acao="cliente_recriado", task=task_id)
                 await saida.falhou(MSG_CLIENTE_RECRIADO)
                 return
-            emitir("ponte", acao="retomada", task=task_id, trace_id=estado.trace_id, aceita=aceita)
+            emitir("ponte", acao="retomada", task=task_id, trace_id=trace_id, aceita=aceita)
             resultado = await self._mcp.chamar_ferramenta(
                 estado.tool_name,
                 dict(estado.original_arguments),
-                trace_id=estado.trace_id,
+                trace_id=trace_id,
                 input_responses={estado.input_request_key: resposta},
                 request_state=estado.request_state,
             )
