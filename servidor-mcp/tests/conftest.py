@@ -23,3 +23,14 @@ def servidor(segredo: str) -> Iterator[Servidor]:
         yield srv
     finally:
         srv.parar()
+
+
+@pytest.fixture
+def fresco(segredo: str) -> Iterator[Servidor]:
+    """Processo novo por teste (o estado das reservas e em memoria)."""
+    srv = Servidor(segredo=segredo)
+    try:
+        srv.esperar_pronto()
+        yield srv
+    finally:
+        srv.parar()

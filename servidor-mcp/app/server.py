@@ -13,6 +13,7 @@ from starlette.types import ASGIApp
 from .config import Config
 from .data import Dados, carregar_dados
 from .log import RegistroDeRequests, emitir
+from .mrtr import registrar_reserva
 from .reservations import Agenda
 from .resources import registrar_resources
 from .tools import registrar_tools
@@ -38,7 +39,9 @@ def criar_servidor(config: Config, dados: Dados) -> MCPServer:
         ),
         log_level="WARNING",  # o SDK nao loga request; evita ruido no stderr
     )
-    registrar_tools(mcp, dados, Agenda(dados.reservas))
+    agenda = Agenda(dados.reservas)
+    registrar_tools(mcp, dados, agenda)  # listar_salas, consultar_disponibilidade
+    registrar_reserva(mcp, dados, agenda)  # reservar_sala (MRTR)
     registrar_resources(mcp, dados)
     return mcp
 

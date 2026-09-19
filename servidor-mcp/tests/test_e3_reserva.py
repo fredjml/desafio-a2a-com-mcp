@@ -1,4 +1,4 @@
-"""Integracao E3 (processo REAL): reservar_sala no caminho feliz (sem MRTR; conflito e provisorio ate a E4a)."""
+"""Integracao E3 (processo REAL): reservar_sala no caminho feliz e validacoes. O conflito (MRTR) e da E4."""
 
 from __future__ import annotations
 
@@ -26,14 +26,6 @@ CHAVES_DA_RESERVA = [
     "politica",
     "motivo",
 ]
-
-CINCO_MENSAGENS = {
-    "Sala inexistente: sala-delorean",
-    "Fora da janela de uso: a politica permite reservas entre 08:00 e 20:00",
-    "Duracao acima do limite: a politica permite no maximo 2 horas",
-    "Intervalo invalido: fim deve ser posterior a inicio",
-    "Sem alternativas disponiveis no intervalo",
-}
 
 
 def h(hora: str, fuso: str = "-03:00") -> str:
@@ -291,7 +283,8 @@ def test_reserva_com_z_e_normalizada_para_menos_tres(servidor_fresco: Servidor) 
             },
         },
     ).json()["result"]
-    assert outra["isError"] is True and "structuredContent" not in outra
+    # conflito => MRTR (E4a): pergunta a alternativa; nada foi reservado
+    assert outra["resultType"] == "input_required" and "structuredContent" not in outra
 
 
 def test_reservar_no_passado_e_permitido(servidor_fresco: Servidor) -> None:
@@ -299,35 +292,6 @@ def test_reservar_no_passado_e_permitido(servidor_fresco: Servidor) -> None:
         servidor_fresco, "sala-aquario", "2001-01-01T09:00:00-03:00", "2001-01-01T10:00:00-03:00"
     )
     assert res["isError"] is False and res["structuredContent"]["reservado"] is True
-
-
-# ---------------------------------------------------------------- conflito: PROVISORIO ate a E4a
-def test_conflito_ainda_nao_faz_mrtr_e_nao_cria_reserva(servidor_fresco: Servidor) -> None:
-    """TODO(E4a): este teste sera substituido pelo fluxo input_required. Hoje: erro provisorio marcado."""
-    srv = servidor_fresco
-    resp = srv.rpc(
-        "tools/call",
-        {
-            "name": "reservar_sala",
-            "arguments": {
-                "sala": "sala-garagem",
-                "inicio": h("14:00"),
-                "fim": h("15:00"),
-                "responsavel": "Marty",
-            },
-        },
-    )
-    res = resp.json()["result"]
-    assert res["isError"] is True and res["resultType"] == "complete"
-    texto = res["content"][0]["text"]
-    assert texto.startswith(
-        "PROVISORIO(E4a)"
-    )  # claramente marcado; nao imita as 5 mensagens do enunciado
-    assert texto not in CINCO_MENSAGENS
-    assert "inputRequests" not in res and "requestState" not in res
-    # nada foi gravado: a garagem segue com o unico conflito do seed
-    cons = consultar(srv, "sala-garagem", h("14:00"), h("15:00"))["structuredContent"]
-    assert [c["id"] for c in cons["conflitos"]] == ["res-0001"]
 
 
 # ---------------------------------------------------------------- atomicidade e privacidade do log
